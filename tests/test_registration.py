@@ -8,25 +8,138 @@ package). It is skipped automatically if omnigent isn't importable.
 
 from __future__ import annotations
 
-import importlib.util
+import importlib.metadata
+import sys
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 
-def test_contribution_shape():
+def _plugin_entry_point_is_installed() -> bool:
+    entry_points = importlib.metadata.entry_points()
+    if hasattr(entry_points, "select"):
+        candidates = entry_points.select(group="omnigent.community.harness")
+    else:  # Python 3.9 compatibility for local contributor environments.
+        candidates = entry_points.get("omnigent.community.harness", ())
+    return any(
+        entry_point.name == "muse"
+        and entry_point.value
+        == "omnigent.community.harness.muse.plugin:get_contribution"
+        for entry_point in candidates
+    )
+
+
+def test_contribution_shape_and_capabilities():
+    from omnigent.harness_capabilities import (
+        AuthModel,
+        EffortFamily,
+        Elicitation,
+        IntegrationMode,
+        ModelFamily,
+        Resume,
+    )
     from omnigent.community.harness.muse.plugin import get_contribution
 
     c = get_contribution()
+    assert c.name == "omnigent-muse"
+    assert c.valid_harnesses == frozenset({"muse"})
     assert "muse" in c.valid_harnesses
-    assert c.harness_modules["muse"].startswith("omnigent.community.harness.")
+    assert (
+        c.harness_modules["muse"]
+        == "omnigent.community.harness.muse.inner.muse_harness"
+    )
     assert c.aliases["muse-code"] == "muse"
     assert c.harness_labels["muse"] == "Muse"
-    assert c.capabilities["muse"].integration_mode.value == "cli-subprocess"
+    assert c.model_env_keys == {"muse": "HARNESS_MUSE_MODEL"}
+    assert c.spawn_env_builders == {
+        "muse": "omnigent.community.harness.muse.plugin:build_spawn_env"
+    }
+
+    capabilities = c.capabilities["muse"]
+    assert capabilities.integration_mode is IntegrationMode.CLI_SUBPROCESS
+    assert capabilities.elicitation is Elicitation.JSONRPC
+    assert capabilities.resume is Resume.NONE
+    assert capabilities.effort is EffortFamily.NONE
+    assert capabilities.model_family is ModelFamily.MULTI
+    assert capabilities.auth is AuthModel.OWN_AUTH
+    assert capabilities.subagents is False
+    assert capabilities.interrupt is True
+    assert capabilities.streaming is True
+
+
+def test_install_and_auth_metadata():
+    from omnigent.community.harness.muse.plugin import get_contribution
+
+    contribution = get_contribution()
+    install = contribution.install_specs["muse"]
+
+    assert install.display == "Muse"
+    assert install.binary == "muse"
+    assert install.package is None
+    assert install.login_args == ("login",)
+    assert install.logout_args == ("logout",)
+    assert install.min_version == "1.3.0"
+    assert install.install_hint == "curl -fsSL https://dev.meta.ai/install.sh | bash"
+    assert contribution.harness_install_keys == {"muse": "muse", "muse-code": "muse"}
+
+
+def test_contribution_discovery_does_not_import_muse_sdk():
+    from omnigent.community.harness.muse.plugin import get_contribution
+
+    before = {
+        name
+        for name in sys.modules
+        if name == "muse_code" or name.startswith("muse_code.")
+    }
+    get_contribution()
+    after = {
+        name
+        for name in sys.modules
+        if name == "muse_code" or name.startswith("muse_code.")
+    }
+
+    assert after == before
+
+
+@pytest.mark.parametrize(
+    ("spec", "cwd", "expected"),
+    [
+        (
+            SimpleNamespace(executor=SimpleNamespace(model="muse-large")),
+            None,
+            {"HARNESS_MUSE_MODEL": "muse-large"},
+        ),
+        (
+            SimpleNamespace(executor=None, model="fallback-model"),
+            Path("/tmp/workspace"),
+            {
+                "HARNESS_MUSE_MODEL": "fallback-model",
+                "HARNESS_MUSE_CWD": "/tmp/workspace",
+            },
+        ),
+        (SimpleNamespace(executor=SimpleNamespace(model=None), model=None), None, {}),
+    ],
+)
+def test_build_spawn_env(spec, cwd, expected):
+    from omnigent.community.harness.muse.plugin import build_spawn_env
+
+    assert build_spawn_env(spec, cwd=cwd) == expected
+
+
+def test_build_spawn_env_returns_a_fresh_mapping():
+    from omnigent.community.harness.muse.plugin import build_spawn_env
+
+    spec = SimpleNamespace(executor=SimpleNamespace(model="muse-large"))
+    first = build_spawn_env(spec)
+    first["MUTATED"] = "yes"
+
+    assert build_spawn_env(spec) == {"HARNESS_MUSE_MODEL": "muse-large"}
 
 
 @pytest.mark.skipif(
-    importlib.util.find_spec("omnigent.harness_plugins") is None,
-    reason="omnigent not installed in this environment",
+    not _plugin_entry_point_is_installed(),
+    reason="omnigent-muse entry point is not installed in this environment",
 )
 def test_registered_in_omnigent():
     import omnigent.harness_plugins as hp
