@@ -4,7 +4,6 @@ default:
 set dotenv-load := true
 
 core-dir := env("OMNIGENT_CORE_DIR", "../omnigent")
-sdk-dir := env("MUSE_CODE_SDK_DIR", "../muse-code-sdk")
 registry-config := env(
     "OMNIGENT_PYPI_CONFIG",
     "../../Databricks/databricks-field-eng/scaling-cool-cucumbers/pyproject.toml",
@@ -62,13 +61,13 @@ core-ensure:
     cd {{core-dir}}
     UV_INDEX_URL="$index_url" uv sync --extra all --group dev
 
-# Install this plugin and the local Muse SDK into the sibling Omnigent venv.
+# Install this plugin into the sibling Omnigent venv (non-editable: editable
+# installs resolve through PEP 660 finder hooks, which core's namespace
+# extending can't see, so the plugin's modules won't import).
 [group('integration')]
 core-install: core-ensure
     cd {{core-dir}} && uv pip install --python .venv/bin/python \
-        -e {{justfile_directory()}} \
-        -e {{justfile_directory()}}/{{sdk-dir}}/python/clients/sdk-py \
-        -e {{justfile_directory()}}/{{sdk-dir}}/python/clients/msp-py
+        {{justfile_directory()}}
 
 # Launch Omnigent's full development pod. Press R after plugin edits.
 [group('integration')]

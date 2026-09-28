@@ -4,8 +4,9 @@
 ``muse`` harness id to this module. It returns the FastAPI app built by
 ``ExecutorAdapter``, which installs the elicitation/policy bridges.
 
-Step 1 (this file) is a registration skeleton: ``MuseExecutor.run_turn`` is a
-documented stub. Step 2 wires the ``muse_code`` SDK over MSP (see the plan).
+``MuseExecutor.run_turn`` is still a documented stub: wiring it to the
+vendored :mod:`msp_client` transport (turn submit, stream translation,
+approval bridging) is the next step.
 """
 
 from __future__ import annotations
@@ -24,10 +25,10 @@ _ENV_CWD = "HARNESS_MUSE_CWD"
 class MuseExecutor(Executor):
     """Skeleton executor for the Muse (MSP) harness.
 
-    Step 2 will drive ``muse serve`` via the ``muse_code`` SDK
-    (``MuseClient.spawn`` -> ``start_session`` -> ``send_user_turn`` ->
-    ``turn.items()`` / ``await turn.completed``) and translate MSP items/deltas into
-    omnigent ``ExecutorEvent``s, bridging tool approval to ASK elicitation.
+    The next step drives ``muse serve`` via the vendored ``msp_client``
+    (``MspClient.spawn`` -> ``start_session`` -> ``send_turn`` ->
+    ``TurnStream.follow``) and translates MSP events into omnigent
+    ``ExecutorEvent``s, bridging tool approval to ASK elicitation.
     """
 
     def __init__(self, *, muse_bin: str, model: str | None, cwd: str | None) -> None:
@@ -41,7 +42,7 @@ class MuseExecutor(Executor):
     async def run_turn(self, messages, tools, system_prompt, config=None):
         raise NotImplementedError(
             "omnigent-muse scaffold: MuseExecutor.run_turn is not implemented yet "
-            "(Step 2 wires the muse_code SDK over MSP)."
+            "(wiring it to the vendored MSP client is the next step)."
         )
         yield  # unreachable — keeps this coroutine an async generator
 

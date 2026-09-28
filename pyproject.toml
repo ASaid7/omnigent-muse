@@ -11,15 +11,17 @@ requires-python = ">=3.12"          # match omnigent (the Muse SDK itself is 3.1
 license = "MIT"
 dependencies = [
   "omnigent>=0.11.0.dev0,<1",       # pin to the core version you build against
-  "muse-code-sdk>=1.3,<2",          # import `muse_code`  (used in Step 2)
-  "muse-code-msp>=1.3,<2",          # import `muse_code_msp`
 ]
 
 [dependency-groups]
 dev = [
   "pytest>=7",
+  "pytest-asyncio>=0.23",
   "ruff>=0.11",
 ]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
 
 [project.entry-points."omnigent.community.harness"]
 muse = "omnigent.community.harness.muse.plugin:get_contribution"
@@ -28,8 +30,6 @@ muse = "omnigent.community.harness.muse.plugin:get_contribution"
 where = ["src"]
 namespaces = true
 
-# Local sibling checkouts for offline/dev installs. Remove before publishing.
+# Local sibling checkout for offline/dev installs. Remove before publishing.
 [tool.uv.sources]
 omnigent      = { path = "../omnigent", editable = true }
-muse-code-sdk = { path = "../muse-code-sdk/python/clients/sdk-py", editable = true }
-muse-code-msp = { path = "../muse-code-sdk/python/clients/msp-py", editable = true }

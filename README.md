@@ -4,23 +4,28 @@ A community-plugin harness that adds **Muse Code** to [Omnigent](https://github.
 
 Muse is an interactive terminal coding agent that serves the **Muse Session Protocol
 (MSP)** over stdio via `muse serve`. This package registers a headless `muse` harness
-through Omnigent's `omnigent.community.harness` entry point and drives Muse via its
-official Python SDK ([`muse-code-sdk`](https://github.com/meta-models/muse-code-sdk)).
+through Omnigent's `omnigent.community.harness` entry point and drives it with a
+vendored async MSP client (`inner/msp_client.py`). Vendoring is deliberate: the
+published [`muse-code-sdk`](https://github.com/meta-models/muse-code-sdk) 1.3.1 is
+fingerprint-pinned to host 1.3.0 and rejects current CLI releases, with no newer SDK
+on PyPI — so the SDK can't be a runtime dependency until Meta publishes a matching
+release. The vendored client is a thin seam that a future SDK can replace.
 
-> **Status: Step 1 scaffold.** The harness is *discoverable* (id, alias `muse-code`,
-> label, install spec, capabilities, catalog row, importable `create_app()`), but the
-> executor's `run_turn` is a stub — the functional MSP round-trip lands in Step 2.
+> **Status.** The harness is *discoverable* (id, alias `muse-code`, label, install
+> spec, capabilities, catalog row, importable `create_app()`), and the MSP transport
+> is implemented and hermetically tested — but the executor's `run_turn` is still a
+> stub. Wiring it to the transport is the next step.
 
 ## Install (local dev)
 
 ```sh
-# from this directory, with sibling ../omnigent and ../muse-code-sdk checkouts
-uv pip install -e ../omnigent -e .
+# from this directory, with a sibling ../omnigent checkout
+uv pip install .
 ```
 
-`[tool.uv.sources]` in `pyproject.toml` points the `muse-code-sdk` / `muse-code-msp`
-dependencies at the local checkouts under `../muse-code-sdk/python/clients/`. Remove
-those source overrides before publishing.
+Use a regular (non-editable) install: editable installs resolve through PEP 660
+finder hooks rather than plain `sys.path` entries, which core's namespace
+extending can't see — the plugin's modules won't import.
 
 ## Verify discovery
 
@@ -33,8 +38,8 @@ pytest -q
 ## Requirements
 
 - `muse` CLI on PATH (or set `OMNIGENT_MUSE_PATH`). Install: `curl -fsSL https://dev.meta.ai/install.sh | bash`.
-- The `muse-code-sdk` version must serve a schema fingerprint compatible with the
-  installed `muse` host, or the SDK raises `MuseHostMismatchError` at handshake.
+- Transport verified live against `muse` 1.4.0 (echo provider). The client records
+  the served schema fingerprint without gating on it.
 
 ## License
 
