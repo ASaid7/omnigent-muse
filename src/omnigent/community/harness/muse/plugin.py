@@ -13,8 +13,6 @@ _MODULE = "omnigent.community.harness.muse.inner.muse_harness"
 
 def get_contribution():
     # Import-light: registry/spec/capability types only (no SDK, no runtime).
-    from omnigent.harness_plugins import HarnessContribution
-    from omnigent.harness_install_spec import HarnessInstallSpec
     from omnigent.harness_capabilities import (
         AuthModel,
         EffortFamily,
@@ -24,6 +22,8 @@ def get_contribution():
         ModelFamily,
         Resume,
     )
+    from omnigent.harness_install_spec import HarnessInstallSpec
+    from omnigent.harness_plugins import HarnessContribution
 
     return HarnessContribution(
         name="omnigent-muse",

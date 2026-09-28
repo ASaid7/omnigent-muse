@@ -13,7 +13,6 @@ from __future__ import annotations
 import os
 
 from fastapi import FastAPI
-
 from omnigent.harness_startup_config import resolve_harness_path
 from omnigent.inner.executor import Executor
 from omnigent.runtime.harnesses._executor_adapter import ExecutorAdapter
@@ -51,7 +50,9 @@ def _build_muse_executor() -> Executor:
     return MuseExecutor(
         muse_bin=resolve_harness_path("muse") or "muse",
         model=os.environ.get(_ENV_MODEL) or None,
-        cwd=os.environ.get(_ENV_CWD) or os.environ.get("OMNIGENT_RUNNER_WORKSPACE") or None,
+        cwd=os.environ.get(_ENV_CWD)
+        or os.environ.get("OMNIGENT_RUNNER_WORKSPACE")
+        or None,
     )
 
 

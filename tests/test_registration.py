@@ -39,6 +39,7 @@ def test_contribution_shape_and_capabilities():
         ModelFamily,
         Resume,
     )
+
     from omnigent.community.harness.muse.plugin import get_contribution
 
     c = get_contribution()
