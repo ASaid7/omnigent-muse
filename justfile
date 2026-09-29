@@ -34,6 +34,7 @@ test:
 lint:
     uv run --no-sync ruff check .
     uv run --no-sync ruff format --check .
+    uv run --no-sync pyrefly check
 
 # Run all fast local checks.
 [group('check')]

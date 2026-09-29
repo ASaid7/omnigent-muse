@@ -1,0 +1,11 @@
+project-includes = [
+    "src/**/*.py",
+    "tests/**/*.py",
+]
+
+project-excludes = []
+disable-project-excludes-heuristics = true
+
+python-version = "3.12"
+search-path = ["src", "../omnigent"]
+disable-search-path-heuristics = true

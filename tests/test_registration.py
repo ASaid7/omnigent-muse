@@ -17,11 +17,9 @@ import pytest
 
 
 def _plugin_entry_point_is_installed() -> bool:
-    entry_points = importlib.metadata.entry_points()
-    if hasattr(entry_points, "select"):
-        candidates = entry_points.select(group="omnigent.community.harness")
-    else:  # Python 3.9 compatibility for local contributor environments.
-        candidates = entry_points.get("omnigent.community.harness", ())
+    candidates = importlib.metadata.entry_points().select(
+        group="omnigent.community.harness"
+    )
     return any(
         entry_point.name == "muse"
         and entry_point.value
