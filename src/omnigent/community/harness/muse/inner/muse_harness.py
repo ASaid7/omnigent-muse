@@ -11,10 +11,17 @@ documented stub. Step 2 wires the ``muse_code`` SDK over MSP (see the plan).
 from __future__ import annotations
 
 import os
+from collections.abc import AsyncIterator
 
 from fastapi import FastAPI
 from omnigent.harness_startup_config import resolve_harness_path
-from omnigent.inner.executor import Executor
+from omnigent.inner.executor import (
+    Executor,
+    ExecutorConfig,
+    ExecutorEvent,
+    Message,
+    ToolSpec,
+)
 from omnigent.runtime.harnesses._executor_adapter import ExecutorAdapter
 
 _ENV_MODEL = "HARNESS_MUSE_MODEL"
@@ -38,12 +45,18 @@ class MuseExecutor(Executor):
     def supports_streaming(self) -> bool:
         return True
 
-    async def run_turn(self, messages, tools, system_prompt, config=None):
+    async def run_turn(
+        self,
+        messages: list[Message],
+        tools: list[ToolSpec],
+        system_prompt: str,
+        config: ExecutorConfig | None = None,
+    ) -> AsyncIterator[ExecutorEvent]:
         raise NotImplementedError(
             "omnigent-muse scaffold: MuseExecutor.run_turn is not implemented yet "
             "(Step 2 wires the muse_code SDK over MSP)."
         )
-        yield  # unreachable — keeps this coroutine an async generator
+        yield ExecutorEvent()  # unreachable — keeps this an async generator
 
 
 def _build_muse_executor() -> Executor:

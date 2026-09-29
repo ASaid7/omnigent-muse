@@ -1,0 +1,130 @@
+name: Lint
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lint-${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+env:
+  OMNIGENT_SKIP_WEB_UI: "true"
+  UV_INDEX_URL: https://pypi.org/simple
+  PIP_INDEX_URL: https://pypi.org/simple
+
+jobs:
+  gate:
+    uses: ./.github/workflows/security-gate.yml
+
+  lint:
+    name: Python and workflow checks
+    needs: gate
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out plugin
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          path: omnigent-muse
+          persist-credentials: false
+
+      - name: Check out Omnigent
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: omnigent-ai/omnigent
+          path: omnigent
+          persist-credentials: false
+
+      - name: Check out Muse SDK
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: meta-models/muse-code-sdk
+          path: muse-code-sdk
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: "0.12.15"
+          enable-cache: true
+          cache-dependency-glob: omnigent-muse/pyproject.toml
+
+      - name: Install development environment
+        working-directory: omnigent-muse
+        run: uv sync --group dev
+
+      - name: Run Ruff
+        working-directory: omnigent-muse
+        run: |
+          uv run --no-sync ruff check .
+          uv run --no-sync ruff format --check .
+
+      - name: Run Pyrefly
+        working-directory: omnigent-muse
+        run: uv run --no-sync pyrefly check
+
+      - name: Check workflow action pinning
+        working-directory: omnigent-muse
+        run: |
+          changed_file=$(mktemp)
+          find .github/workflows -type f \( -name '*.yml' -o -name '*.yaml' \) -print > "$changed_file"
+          CHANGED_FILES="$changed_file" python3 .github/scripts/security-scan/lint-workflow-misuse.py
+
+      - name: Check shell syntax
+        working-directory: omnigent-muse
+        run: |
+          bash -n \
+            .github/scripts/merge-ready/load-maintainers.sh \
+            .github/scripts/security-scan/sensitive-paths.sh \
+            .github/scripts/security-scan/should-scan.sh
+
+  package:
+    name: Build package
+    needs: gate
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out plugin
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: "0.12.15"
+          enable-cache: true
+          cache-dependency-glob: pyproject.toml
+
+      - name: Build distributions
+        run: uv build --out-dir dist
+
+      - name: Validate distributions
+        run: uvx --from twine twine check dist/*
+
+      - name: Upload distributions
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: distributions-${{ github.sha }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
