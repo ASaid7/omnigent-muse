@@ -225,6 +225,69 @@ async def test_request_timeout(tmp_path: Path) -> None:
         await client.close()
 
 
+async def test_request_timeout_clears_pending(tmp_path: Path) -> None:
+    client = await _spawn(tmp_path, FAKE_MSP_HANG="usage/read")
+    try:
+        for _ in range(3):
+            with pytest.raises(TimeoutError, match="usage/read"):
+                await client.read_usage("s", timeout=0.02)
+            assert client._pending == {}
+    finally:
+        await client.close()
+
+
+async def test_request_cancellation_clears_pending(tmp_path: Path) -> None:
+    client = await _spawn(tmp_path, FAKE_MSP_HANG="usage/read")
+    request = asyncio.create_task(client.read_usage("s"))
+    try:
+        async with asyncio.timeout(2):
+            while not _method_frames(tmp_path, "usage/read"):
+                await asyncio.sleep(0.01)
+        request.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await request
+        assert client._pending == {}
+    finally:
+        request.cancel()
+        await asyncio.gather(request, return_exceptions=True)
+        await client.close()
+
+
+async def test_serialization_failure_clears_pending(tmp_path: Path) -> None:
+    client = await _spawn(tmp_path)
+    try:
+        with pytest.raises(MspProtocolError, match="JSON-encodable"):
+            await client.request("usage/read", {"invalid": object()})
+        assert client._pending == {}
+    finally:
+        await client.close()
+
+
+async def test_late_response_after_timeout_is_ignored(tmp_path: Path) -> None:
+    client = await _spawn(tmp_path, FAKE_MSP_HANG="usage/read")
+    try:
+        with pytest.raises(TimeoutError):
+            await client.read_usage("s", timeout=0.02)
+        [request] = _method_frames(tmp_path, "usage/read")
+        frame = {"jsonrpc": "2.0", "id": request["id"], "result": {}}
+        client._route_frame(frame, json.dumps(frame))
+        assert client._pending == {}
+        assert not client.closed
+        assert (await client.start_session())["sessionId"] == "sess-1"
+    finally:
+        await client.close()
+
+
+async def test_eof_clears_pending(tmp_path: Path) -> None:
+    client = await _spawn(tmp_path, FAKE_MSP_SCENARIO="die_on_turn")
+    try:
+        with pytest.raises(MspConnectionClosed):
+            await client.send_turn("s", [{"type": "text", "text": "hi"}])
+        assert client._pending == {}
+    finally:
+        await client.close()
+
+
 async def test_close_reaps_child(tmp_path: Path) -> None:
     client = await _spawn(tmp_path)
     assert client._proc is not None and client._proc.returncode is None

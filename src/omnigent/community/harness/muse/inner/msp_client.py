@@ -277,8 +277,7 @@ class MspClient:
                 "requestedCapabilities": list(requested_capabilities)
             }
         try:
-            async with asyncio.timeout(timeout):
-                result = await self._request_raw("initialize", params)
+            result = await self.request("initialize", params, timeout=timeout)
         except (TimeoutError, MspConnectionClosed, MspProtocolError) as exc:
             raise MspConnectionClosed(self._startup_error_message(exc)) from exc
         except MspError as exc:
@@ -351,7 +350,7 @@ class MspClient:
         """
         if self._closed.is_set():
             raise MspConnectionClosed(f"{self._label}: connection is closed")
-        future = self._request_raw(method, params or {})
+        request_id, future = self._request_raw(method, params or {})
         try:
             async with asyncio.timeout(timeout):
                 return await future
@@ -359,10 +358,14 @@ class MspClient:
             raise TimeoutError(
                 f"{self._label}: no answer to {method} within {timeout:g}s"
             ) from exc
+        finally:
+            self._pending.pop(request_id, None)
+            if not future.done():
+                future.cancel()
 
     def _request_raw(
         self, method: str, params: JsonObject
-    ) -> asyncio.Future[JsonObject]:
+    ) -> tuple[int, asyncio.Future[JsonObject]]:
         loop = asyncio.get_running_loop()
         future: asyncio.Future[JsonObject] = loop.create_future()
         self._next_request_id += 1
@@ -372,7 +375,7 @@ class MspClient:
         if params:
             frame["params"] = params
         self._enqueue_write(frame, future)
-        return future
+        return request_id, future
 
     async def command(
         self,
@@ -652,7 +655,9 @@ class MspClient:
             return
         self._close_error = error
         self._closed.set()
-        for future in self._pending.values():
+        pending = tuple(self._pending.values())
+        self._pending.clear()
+        for future in pending:
             if not future.done():
                 future.set_exception(error)
         # Balance the queue so a concurrent flush() can't hang forever.
