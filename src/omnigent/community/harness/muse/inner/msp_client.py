@@ -829,6 +829,8 @@ class MspClient:
     def _translate_notification(
         session_id: str, turn_id: str, method: str, params: JsonObject
     ) -> MspEvent | None:
+        if params.get("sessionId") != session_id or params.get("turnId") != turn_id:
+            return None
         if method == "item/delta":
             delta = params.get("delta")
             if not isinstance(delta, str) or not delta:
@@ -853,8 +855,6 @@ class MspClient:
                 else None,
             )
         if method == "turn/completed":
-            if params.get("turnId") not in (None, turn_id):
-                return None
             usage = params.get("usage")
             error = params.get("error") if isinstance(params.get("error"), dict) else {}
             retryable = error.get("retryable")
@@ -874,8 +874,6 @@ class MspClient:
                 error_retryable=retryable if isinstance(retryable, bool) else None,
             )
         if method == "turn/retracted":
-            if params.get("turnId") not in (None, turn_id):
-                return None
             return MspTurnCompleted(
                 session_id=session_id,
                 turn_id=turn_id,
@@ -1028,15 +1026,47 @@ class TurnStream:
         self._client = client
         self._session_id = session_id
         self._queue: asyncio.Queue[tuple[str, JsonObject]] = asyncio.Queue()
+        self._item_turns: dict[str, str] = {}
         self._unsubscribe = client.subscribe(self._tap)
         self._closed = False
 
     def _tap(self, method: str, params: JsonObject) -> None:
-        if params.get("sessionId") == self._session_id:
-            self._queue.put_nowait((method, params))
+        if params.get("sessionId") != self._session_id:
+            return
+        if method in {"item/started", "item/completed"}:
+            item = params.get("item")
+            if isinstance(item, dict):
+                item_id = item.get("itemId")
+                turn_id = item.get("turnId")
+                if isinstance(item_id, str):
+                    if method == "item/completed":
+                        self._item_turns.pop(item_id, None)
+                    elif isinstance(turn_id, str):
+                        self._item_turns[item_id] = turn_id
+            return
+        if method == "item/delta":
+            item_id = params.get("itemId")
+            turn_id = params.get("turnId")
+            if not isinstance(turn_id, str):
+                turn_id = (
+                    self._item_turns.get(item_id)
+                    if isinstance(item_id, str)
+                    else None
+                )
+            if not isinstance(turn_id, str):
+                return
+            # Correlate this stream's copy without changing raw subscribers.
+            params = {**params, "turnId": turn_id}
+        self._queue.put_nowait((method, params))
 
     async def follow(self, turn_id: str) -> AsyncIterator[MspEvent]:
-        """Yield this turn's stream events until its terminal record."""
+        """Yield this turn's stream events until its terminal record.
+
+        Deltas are correlated through ``item/started``; unknown-item
+        deltas are dropped. Usage, approvals, and terminal events must
+        carry the matching ``turnId``. Open before submitting: attaching
+        mid-turn needs replay or snapshot seeding, which is not provided.
+        """
         while True:
             get = asyncio.create_task(self._queue.get())
             closed = asyncio.create_task(self._client.wait_closed())
@@ -1066,6 +1096,7 @@ class TurnStream:
         if not self._closed:
             self._closed = True
             self._unsubscribe()
+            self._item_turns.clear()
 
     def __enter__(self) -> TurnStream:
         return self
