@@ -4,7 +4,7 @@
 
 **Goal:** Address all seven reviewer comments on PR #1 with focused transport fixes and regression coverage.
 
-**Implementation status:** All seven fixes are implemented and committed locally. Checked steps indicate their intended outcomes are covered; some regression names and instrumentation changed during implementation. See [review results](../reviews/2026-09-30-msp-transport-review-results.md) for final commits, passing evidence, implementation adjustments, and draft comment responses. Successful live text/usage validation remains open because the isolated echo session returns `authRequired`.
+**Implementation status:** All seven fixes are implemented and committed locally, and all local validation items are complete. Checked steps indicate their intended outcomes are covered; some regression names and instrumentation changed during implementation. See [review results](../reviews/2026-09-30-msp-transport-review-results.md) for final commits, passing evidence, implementation adjustments, and draft comment responses. Successful live text/usage validation passed with the existing account login on Muse 1.4.1; the isolated echo route returned `authRequired`.
 
 **Architecture:** Keep the existing subprocess, ordered writer, request correlation, and notification subscription design. Give every future and background task an explicit cleanup path, honor the host's retry flag, and correlate item deltas to their owning turn before translation.
 
@@ -627,7 +627,7 @@ This is the main behavioral compatibility change. A host omitting item lifecycle
 - [x] Run `PYTHONASYNCIODEBUG=1 uv run --no-sync pytest -q`. Expect the complete suite to pass without unhandled task exceptions or pending-task warnings. Preserve the remote head's registration and security-scan coverage.
 - [x] Run `uv build --out-dir /tmp/omnigent-muse-review-dist` and `uvx --from twine twine check /tmp/omnigent-muse-review-dist/*`. Expect valid wheel and source distributions.
 - [x] Verify the package still registers `muse` with zero plugin load errors in the established regular-install development workflow. Match the remote CI checks on Python 3.12 and 3.13.
-- [ ] Run one live echo-provider turn against the supported Muse CLI, confirming item lifecycle correlation preserves deltas, usage, and completion. Record the CLI version and served fingerprint in validation notes.
+- [x] Run one successful live turn against the supported Muse CLI, confirming item lifecycle correlation preserves deltas, usage, and completion. Record the CLI version and served fingerprint in validation notes. Completed using the authenticated Meta provider because the isolated echo route returned `authRequired`.
 - [x] Run `git diff --check` and inspect the final diff for unrelated changes.
 - [x] Prepare a review response for each of the seven links above, naming the fix and its relevant passing regression. For the scoping thread, explain item correlation and link the schema; for the pending-map thread, mention `_finish()` now clears the map as well.
 - [x] Prepare the follow-up PR #3 integration note identifying the two xfail markers to remove. Do not include executor implementation changes in this transport PR.

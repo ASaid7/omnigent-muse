@@ -31,21 +31,28 @@ Validated on September 30, 2026, against production/test head `7b4c9d5`:
 | Wheel / source distribution build | Both built successfully. |
 | Twine distribution checks | Both passed. |
 | Regular wheel installation on Python 3.12 and 3.13 | `muse` registers with zero plugin load errors; transport imports from the installed wheel. All eight registration tests pass on each version. Development editable installations restored afterward. |
+| Live Muse 1.4.1 with existing account login | Passed against `meta` / `muse-spark-1.3-contributor`: expected text marker streamed, one text delta and one token-usage event received, `usage/read` answered, matching turn completed without error, and child reaped. |
 | Independent code review | Two additional handler shutdown regressions found, reproduced, fixed, and tested. Re-review reports no remaining important findings; 21 focused tests pass with asyncio debug enabled. |
 | `git diff --check` | Passed. |
 
 The reviewed head's baseline had 34 passing tests, eight Ruff findings, and 77 Pyrefly errors. Commit `75c5385` declares factory-created instance attributes at class scope for Pyrefly and makes the focused formatting/logging corrections needed by the existing CI checks. It does not change protocol behavior.
 
-## Live host validation and its limit
+## Live host validation
 
 An isolated probe used Muse Code **1.4.1 (1.4.1-R4503.1)** with write and shell tools disabled, private temporary XDG directories, and an `echo` session with `allowAll` approval mode. It verified initialization, session creation, turn acceptance, delivery of the matching terminal event, and child reaping during `close()`.
 
 Served schema fingerprint: `sha256:e0e163db6ccf00dbe68402ce55d6319b3edc33c421f31e9583b587b2de8a118f`. This was read from the live initialize response by the probe; the existing client's `schemaInfo` field lookup was not changed.
 
-The host returned `turn/completed` with `error.kind=authRequired` and `retryable=False`, despite accepting the session as provider `echo`. It emitted no agent text deltas or token-usage notification. Successful live text/usage streaming therefore remains unverified. The fake host and the pinned official protocol transcript verify the intended item lifecycle and turn correlation. No user credentials or settings were changed, and no paid provider calls were initiated.
+The initial probe returned `turn/completed` with `error.kind=authRequired` and `retryable=False`, despite accepting the session as provider `echo`. Its isolated configuration hid the user's existing account login. That attempt emitted no agent text deltas or token-usage notification.
+
+A subsequent read-only `account/read` check using the normal login configuration reported `state=accountLogin`. The authenticated live probe retained that configuration while keeping its workspace, session data, and run state in private temporary directories. Write and shell tools remained disabled. It started a `meta` session using `muse-spark-1.3-contributor`; after an initial 60-second timeout, a second attempt with a 120-second limit completed in 10.6 seconds.
+
+The successful attempt received item lifecycle notifications, **one text delta** containing the requested `MUSE_VERIFICATION_OK` marker, **one token-usage event**, and the matching `turn/completed` event without error. `usage/read` also responded successfully. Closure reaped the child and left no pending requests or server handlers. The probe ended with `PASS: live MSP text, usage, completion, and teardown verified`.
+
+No new login was necessary, and no user credentials or settings were changed. Successful live text, usage, completion, and shutdown are now verified on Muse 1.4.1 with the existing account login. The echo-only MSP route on that version remains unverified; the standalone `muse exec --provider echo` command does complete successfully.
 
 ## Follow-up PR integration
 
 When these changes are integrated into [PR #3](https://github.com/R7L208/omnigent-muse/pull/3), remove its non-strict xfail markers on `test_request_timeout_clears_pending` and `test_pending_request_reports_closed_when_writer_cancelled`. These are now ordinary passing regressions in this branch. Keep the follow-up executor work separate from this transport review.
 
-GitHub CI and reviewer replies remain external handoff steps after a user-authorized push. The successful live text/usage probe is the only outstanding local validation item from the original plan.
+All local validation items from the original plan are complete. GitHub CI and reviewer replies remain external handoff steps after a user-authorized push.
