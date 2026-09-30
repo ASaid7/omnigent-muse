@@ -632,7 +632,7 @@ This is the main behavioral compatibility change. A host omitting item lifecycle
 - [x] Prepare a review response for each of the seven links above, naming the fix and its relevant passing regression. For the scoping thread, explain item correlation and link the schema; for the pending-map thread, mention `_finish()` now clears the map as well.
 - [x] Prepare the follow-up PR #3 integration note identifying the two xfail markers to remove. Do not include executor implementation changes in this transport PR.
 
-Posting replies, pushing commits, or requesting another review requires the user's instruction to perform those external actions. The user subsequently authorized implementation. The changes and draft responses are now committed locally; external publication has not been requested.
+The user authorized implementation and subsequently authorized pushing the fixes and replying to every reviewer comment. The changes and responses are ready for that publication; requesting another review or merging the PR remains outside this instruction.
 
 ## Plan self-review
 

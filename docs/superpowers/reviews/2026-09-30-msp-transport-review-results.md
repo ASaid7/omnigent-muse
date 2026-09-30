@@ -1,6 +1,6 @@
 # MSP transport review results
 
-All seven comments on [PR #1](https://github.com/R7L208/omnigent-muse/pull/1) are implemented locally on `feat/msp-transport`, starting from the reviewed head `6afec8ed16687aed5d3b262b783ef876e892818f`. The fixes are committed individually. No commits or review replies have been pushed or posted.
+All seven comments on [PR #1](https://github.com/R7L208/omnigent-muse/pull/1) are addressed on `feat/msp-transport`, starting from the reviewed head `6afec8ed16687aed5d3b262b783ef876e892818f`. The fixes are committed individually. The user has authorized pushing the branch and posting the comment responses below; the PR records their publication and current CI status.
 
 ## Comment responses ready for review
 
@@ -55,4 +55,4 @@ No new login was necessary, and no user credentials or settings were changed. Su
 
 When these changes are integrated into [PR #3](https://github.com/R7L208/omnigent-muse/pull/3), remove its non-strict xfail markers on `test_request_timeout_clears_pending` and `test_pending_request_reports_closed_when_writer_cancelled`. These are now ordinary passing regressions in this branch. Keep the follow-up executor work separate from this transport review.
 
-All local validation items from the original plan are complete. GitHub CI and reviewer replies remain external handoff steps after a user-authorized push.
+All local validation items from the original plan are complete. Before publication, the branch also incorporated upstream's contribution-template commit `09ddc996d56a20b5258874d3c2a69d8fdc97ffbd`. It changes no runtime code. Fresh verification again passed all 85 tests on Python 3.12 and 3.13, Ruff, formatting, and Pyrefly. GitHub CI is checked on the pushed head; review approval remains with the reviewer.
