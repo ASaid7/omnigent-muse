@@ -378,6 +378,84 @@ async def test_server_request_default_answer(tmp_path: Path) -> None:
         await client.close()
 
 
+@pytest.mark.parametrize("host_dies", [False, True])
+async def test_close_joins_server_request_handlers(
+    tmp_path: Path, host_dies: bool
+) -> None:
+    client = await _spawn(tmp_path)
+    entered = asyncio.Event()
+    exited = asyncio.Event()
+
+    async def handler(method: str, params: dict) -> dict:
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            exited.set()
+        return {}
+
+    client.set_server_request_handler(handler)
+    frame = {"jsonrpc": "2.0", "id": 900, "method": "host/ping", "params": {}}
+    before = asyncio.all_tasks()
+    client._route_frame(frame, json.dumps(frame))
+    [handler_task] = asyncio.all_tasks() - before
+    try:
+        async with asyncio.timeout(2):
+            await entered.wait()
+        if host_dies:
+            client._proc.kill()
+            await client.wait_closed()
+        await client.close()
+        assert exited.is_set()
+        assert handler_task.done()
+        assert client._server_request_tasks == set()
+    finally:
+        handler_task.cancel()
+        await asyncio.gather(handler_task, return_exceptions=True)
+        await client.close()
+
+
+@pytest.mark.parametrize("response", ["success", "msp_error", "exception"])
+async def test_server_request_handler_response_and_self_eviction(
+    tmp_path: Path, response: str
+) -> None:
+    client = await _spawn(tmp_path)
+
+    async def handler(method: str, params: dict) -> dict:
+        assert (method, params) == ("host/ping", {"value": 1})
+        if response == "msp_error":
+            raise MspError(-32000, "denied", kind="denied", data={"retryable": False})
+        if response == "exception":
+            raise ValueError("handler failed")
+        return {"ok": True}
+
+    client.set_server_request_handler(handler)
+    frame = {
+        "jsonrpc": "2.0", "id": 901, "method": "host/ping", "params": {"value": 1}
+    }
+    try:
+        client._route_frame(frame, json.dumps(frame))
+        tasks = tuple(client._server_request_tasks)
+        assert len(tasks) == 1
+        await asyncio.gather(*tasks)
+        assert client._server_request_tasks == set()
+        await client.flush()
+        async with asyncio.timeout(2):
+            while not (answers := [f for f in _logged(tmp_path) if f.get("id") == 901]):
+                await asyncio.sleep(0.01)
+        [answer] = answers
+        if response == "success":
+            assert answer["result"] == {"ok": True}
+        elif response == "msp_error":
+            assert answer["error"]["code"] == -32000
+            assert answer["error"]["data"] == {"kind": "denied", "retryable": False}
+        else:
+            assert answer["error"]["code"] == -32603
+            assert answer["error"]["message"] == "handler failed"
+    finally:
+        await client.close()
+
+
 async def test_approval_requested_event_shape() -> None:
     # Pure translation check (no host needed): unknown shapes are dropped,
     # known ones surface the approval id.

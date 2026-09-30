@@ -179,6 +179,7 @@ class MspClient:
         ] = asyncio.Queue()
         self._subscribers: list[NotificationHandler] = []
         self._server_request_handler: ServerRequestHandler | None = None
+        self._server_request_tasks: set[asyncio.Task[None]] = set()
         self._recent_stderr: deque[str] = deque(maxlen=_STDERR_RING_SIZE)
         self._closed = asyncio.Event()
         self._close_error: BaseException | None = None
@@ -522,6 +523,8 @@ class MspClient:
             self._finish(exc)
 
     def _route_frame(self, frame: JsonObject, line: str) -> None:
+        if self.closed:
+            return
         method = frame.get("method")
         frame_id = frame.get("id")
         if isinstance(method, str):
@@ -531,6 +534,7 @@ class MspClient:
                         frame_id, method, frame.get("params") or {}
                     )
                 )
+                self._server_request_tasks.add(task)
                 task.add_done_callback(self._log_task_error)
                 return
             params = frame.get("params")
@@ -633,6 +637,7 @@ class MspClient:
         self._enqueue_write(response)
 
     def _log_task_error(self, done: asyncio.Task[None]) -> None:
+        self._server_request_tasks.discard(done)
         if done.cancelled():
             return
         error = done.exception()
@@ -664,6 +669,9 @@ class MspClient:
             return
         self._close_error = error
         self._closed.set()
+        for task in tuple(self._server_request_tasks):
+            if not task.done():
+                task.cancel()
         pending = tuple(self._pending.values())
         self._pending.clear()
         for future in pending:
@@ -709,14 +717,16 @@ class MspClient:
                         await proc.wait()
         finally:
             self._finish(MspConnectionClosed(f"{self._label}: client closed"))
-            tasks = (self._reader_task, self._stderr_task, self._writer_task)
+            tasks = (
+                self._reader_task,
+                self._stderr_task,
+                self._writer_task,
+                *tuple(self._server_request_tasks),
+            )
             for task in tasks:
                 task.cancel()
-            for task in tasks:
-                try:
-                    await task
-                except (asyncio.CancelledError, Exception):  # noqa: BLE001, S110 — teardown
-                    pass
+            await asyncio.gather(*tasks, return_exceptions=True)
+            self._server_request_tasks.clear()
 
     async def __aenter__(self) -> MspClient:
         return self
