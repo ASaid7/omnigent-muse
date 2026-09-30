@@ -32,7 +32,7 @@ FAKE_HOST = Path(__file__).parent / "fixtures" / "fake_msp_host.py"
 
 
 def _spawn_env(tmp_path: Path, **overrides: str) -> dict[str, str]:
-    env = dict(os.environ)
+    env = os.environ.copy()
     env["FAKE_MSP_LOG"] = str(tmp_path / "fake.log")
     env.update(overrides)
     return env
