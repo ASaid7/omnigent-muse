@@ -687,8 +687,9 @@ class MspClient:
             return
         self._close_error = error
         self._closed.set()
+        caller = asyncio.current_task()
         for task in tuple(self._server_request_tasks):
-            if not task.done():
+            if task is not caller and not task.done() and not task.cancelling():
                 task.cancel()
         pending = tuple(self._pending.values())
         self._pending.clear()
@@ -735,14 +736,18 @@ class MspClient:
                         await proc.wait()
         finally:
             self._finish(MspConnectionClosed(f"{self._label}: client closed"))
+            caller = asyncio.current_task()
             tasks = (
                 self._reader_task,
                 self._stderr_task,
                 self._writer_task,
-                *tuple(self._server_request_tasks),
+                *(task for task in self._server_request_tasks if task is not caller),
             )
             for task in tasks:
-                task.cancel()
+                # A handler may already be awaiting its cancellation cleanup.
+                # Cancelling it again would interrupt that cleanup.
+                if not task.done() and not task.cancelling():
+                    task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
             self._server_request_tasks.clear()
 

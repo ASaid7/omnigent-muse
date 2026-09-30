@@ -590,6 +590,97 @@ async def test_server_request_handler_response_and_self_eviction(
         await client.close()
 
 
+async def test_server_request_handler_can_close_client(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = await _spawn(tmp_path)
+    returned = asyncio.Event()
+    real_gather = asyncio.gather
+
+    async def reject_self_join(*tasks, return_exceptions=False):
+        # Catch the invalid dependency before asyncio recursively cancels it.
+        assert asyncio.current_task() not in tasks, "close must not join its caller"
+        return await real_gather(*tasks, return_exceptions=return_exceptions)
+
+    monkeypatch.setattr(asyncio, "gather", reject_self_join)
+
+    async def handler(method: str, params: dict) -> dict:
+        await client.close()
+        returned.set()
+        return {}
+
+    client.set_server_request_handler(handler)
+    frame = {"jsonrpc": "2.0", "id": 902, "method": "host/close", "params": {}}
+    client._route_frame(frame, json.dumps(frame))
+    [task] = client._server_request_tasks
+    try:
+        async with asyncio.timeout(2):
+            await real_gather(task, return_exceptions=True)
+        assert returned.is_set()
+        assert client._proc.returncode is not None
+        assert client._server_request_tasks == set()
+    finally:
+        task.cancel()
+        await real_gather(task, return_exceptions=True)
+        await client.close()
+        await client._proc.wait()
+        await real_gather(
+            client._reader_task,
+            client._stderr_task,
+            client._writer_task,
+            return_exceptions=True,
+        )
+
+
+async def test_close_awaits_async_handler_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = await _spawn(tmp_path)
+    entered = asyncio.Event()
+    cleanup_started = asyncio.Event()
+    cleanup_finished = asyncio.Event()
+    release = asyncio.Event()
+    joining = asyncio.Event()
+    real_gather = asyncio.gather
+
+    async def observe_join(*tasks, return_exceptions=False):
+        joining.set()
+        return await real_gather(*tasks, return_exceptions=return_exceptions)
+
+    monkeypatch.setattr(asyncio, "gather", observe_join)
+
+    async def handler(method: str, params: dict) -> dict:
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleanup_started.set()
+            await release.wait()
+            cleanup_finished.set()
+        return {}
+
+    client.set_server_request_handler(handler)
+    frame = {"jsonrpc": "2.0", "id": 903, "method": "host/ping", "params": {}}
+    client._route_frame(frame, json.dumps(frame))
+    [handler_task] = client._server_request_tasks
+    async with asyncio.timeout(2):
+        await entered.wait()
+    closing = asyncio.create_task(client.close())
+    try:
+        async with asyncio.timeout(2):
+            await cleanup_started.wait()
+            await joining.wait()
+            release.set()
+            await closing
+        assert cleanup_finished.is_set()
+        assert handler_task.done()
+        assert handler_task.cancelling() == 1
+    finally:
+        release.set()
+        await real_gather(closing, handler_task, return_exceptions=True)
+        await client.close()
+
+
 async def test_approval_requested_event_shape() -> None:
     # Pure translation check (no host needed): unknown shapes are dropped,
     # known ones surface the approval id.
