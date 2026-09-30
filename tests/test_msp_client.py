@@ -288,6 +288,42 @@ async def test_eof_clears_pending(tmp_path: Path) -> None:
         await client.close()
 
 
+@pytest.mark.parametrize("close_client", [False, True])
+async def test_pending_request_reports_closed_when_writer_cancelled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, close_client: bool
+) -> None:
+    client = await _spawn(tmp_path)
+    await client.flush()
+    entered = asyncio.Event()
+
+    async def blocked_write(encoded: bytes) -> None:
+        entered.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(client, "_write_once", blocked_write)
+    request = asyncio.create_task(client.read_usage("s"))
+    queued = asyncio.create_task(client.read_usage("s"))
+    try:
+        async with asyncio.timeout(2):
+            await entered.wait()
+        if close_client:
+            await client.close()
+        else:
+            client._writer_task.cancel()
+            await asyncio.gather(client._writer_task, return_exceptions=True)
+        for task in (request, queued):
+            with pytest.raises(MspConnectionClosed):
+                await task
+        assert client.closed
+        assert client._pending == {}
+        await client.flush(timeout=0.2)
+    finally:
+        for task in (request, queued):
+            task.cancel()
+        await asyncio.gather(request, queued, return_exceptions=True)
+        await client.close()
+
+
 async def test_close_reaps_child(tmp_path: Path) -> None:
     client = await _spawn(tmp_path)
     assert client._proc is not None and client._proc.returncode is None

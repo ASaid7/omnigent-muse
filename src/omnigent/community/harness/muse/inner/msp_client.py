@@ -453,16 +453,25 @@ class MspClient:
                 try:
                     await self._write_once(encoded)
                 except BaseException as exc:
+                    # Writer cancellation belongs to the transport, not to
+                    # callers waiting for a response to an in-flight write.
+                    error = (
+                        MspConnectionClosed(f"{self._label}: connection is closed")
+                        if isinstance(exc, asyncio.CancelledError)
+                        else exc
+                    )
                     if future is not None and not future.done():
-                        future.set_exception(exc)
-                    self._write_queue.task_done()
+                        future.set_exception(error)
+                    self._finish(error)
                     if isinstance(exc, asyncio.CancelledError):
                         raise
-                    self._finish(exc)
                     return
-                self._write_queue.task_done()
+                finally:
+                    self._write_queue.task_done()
         except asyncio.CancelledError:
-            pass
+            self._finish(
+                MspConnectionClosed(f"{self._label}: connection is closed")
+            )
 
     async def _write_once(self, encoded: bytes) -> None:
         proc = self._proc
@@ -677,6 +686,7 @@ class MspClient:
         if self._did_close:
             return
         self._did_close = True
+        self._finish(MspConnectionClosed(f"{self._label}: client closed"))
         proc = self._proc
         self._writer_task.cancel()
         try:
