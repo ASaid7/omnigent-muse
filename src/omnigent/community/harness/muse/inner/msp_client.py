@@ -1035,11 +1035,16 @@ class TurnStream:
         while True:
             get = asyncio.create_task(self._queue.get())
             closed = asyncio.create_task(self._client.wait_closed())
-            done, pending = await asyncio.wait(
-                {get, closed}, return_when=asyncio.FIRST_COMPLETED
-            )
-            for task in pending:
-                task.cancel()
+            tasks = (get, closed)
+            try:
+                done, _ = await asyncio.wait(
+                    tasks, return_when=asyncio.FIRST_COMPLETED
+                )
+            finally:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
             if closed in done and get not in done:
                 raise MspConnectionClosed(f"{self._client._label}: host died mid-turn")
             method, params = get.result()

@@ -12,7 +12,9 @@ import json
 import os
 import re
 import sys
+from collections.abc import Iterable
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -322,6 +324,65 @@ async def test_pending_request_reports_closed_when_writer_cancelled(
             task.cancel()
         await asyncio.gather(request, queued, return_exceptions=True)
         await client.close()
+
+
+@pytest.mark.parametrize("exit_mode", ["cancel", "yield", "complete", "eof", "both_ready"])
+async def test_follow_joins_helpers_on_every_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exit_mode: str
+) -> None:
+    client = await _spawn(tmp_path)
+    helpers: list[asyncio.Task[Any]] = []
+    ready = asyncio.Event()
+    real_wait = asyncio.wait
+
+    async def record_wait(
+        tasks: Iterable[asyncio.Task[Any]], *, return_when: str
+    ) -> tuple[set[asyncio.Task[Any]], set[asyncio.Task[Any]]]:
+        pair = tuple(tasks)
+        helpers.extend(pair)
+        ready.set()
+        return await real_wait(pair, return_when=return_when)
+
+    monkeypatch.setattr(asyncio, "wait", record_wait)
+    with client.open_stream("s") as stream:
+        iterator = stream.follow("t")
+        if exit_mode == "yield":
+            client._fan_out("item/delta", {
+                "sessionId": "s", "turnId": "t", "itemId": "i", "delta": "hello"
+            })
+        elif exit_mode in {"complete", "both_ready"}:
+            client._fan_out("turn/completed", {"sessionId": "s", "turnId": "t"})
+            if exit_mode == "both_ready":
+                client._finish(MspConnectionClosed("test EOF"))
+        consumer = asyncio.create_task(anext(iterator))
+        try:
+            async with asyncio.timeout(2):
+                await ready.wait()
+                if exit_mode == "cancel":
+                    consumer.cancel()
+                    with pytest.raises(asyncio.CancelledError):
+                        await consumer
+                elif exit_mode == "eof":
+                    client._proc.kill()
+                    with pytest.raises(MspConnectionClosed):
+                        await consumer
+                else:
+                    event = await consumer
+                    expected = MspTextDelta if exit_mode == "yield" else MspTurnCompleted
+                    assert isinstance(event, expected)
+                assert len(helpers) == 2
+                assert all(task.done() for task in helpers)
+                if exit_mode in {"complete", "both_ready"}:
+                    with pytest.raises(StopAsyncIteration):
+                        await anext(iterator)
+                await iterator.aclose()
+        finally:
+            consumer.cancel()
+            for task in helpers:
+                task.cancel()
+            await asyncio.gather(consumer, *helpers, return_exceptions=True)
+            await iterator.aclose()
+            await client.close()
 
 
 async def test_close_reaps_child(tmp_path: Path) -> None:
