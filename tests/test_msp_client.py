@@ -189,6 +189,74 @@ async def test_non_retryable_error_raises_at_once(tmp_path: Path) -> None:
         await client.close()
 
 
+@pytest.mark.parametrize(
+    ("kind", "retryable", "attempts"),
+    [
+        ("backpressured", False, 1),
+        ("overloaded", False, 1),
+        ("backpressured", None, 2),
+        ("overloaded", None, 2),
+        ("backpressured", "invalid", 2),
+        ("temporary", True, 2),
+        ("invalidParams", None, 1),
+    ],
+)
+async def test_command_retry_flag_is_authoritative(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+    retryable: bool | str | None,
+    attempts: int,
+) -> None:
+    client = await _spawn(tmp_path)
+    calls: list[dict[str, Any]] = []
+
+    async def request(
+        method: str, params: dict[str, Any] | None = None, *, timeout: float = 30.0
+    ) -> dict[str, Any]:
+        calls.append(dict(params or {}))
+        if len(calls) == 1:
+            data = {} if retryable is None else {"retryable": retryable}
+            raise MspError(-32001, "busy", kind=kind, data=data)
+        return {"status": "accepted"}
+
+    monkeypatch.setattr(client, "request", request)
+    try:
+        if attempts == 1:
+            with pytest.raises(MspError):
+                await client.command("turn/start", {"sessionId": "s"})
+        else:
+            assert await client.command("turn/start", {"sessionId": "s"}) == {
+                "status": "accepted"
+            }
+        assert len(calls) == attempts
+        assert len({call["commandId"] for call in calls}) == 1
+    finally:
+        await client.close()
+
+
+async def test_command_retry_exhaustion_preserves_command_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = await _spawn(tmp_path)
+    calls: list[dict[str, Any]] = []
+
+    async def request(
+        method: str, params: dict[str, Any] | None = None, *, timeout: float = 30.0
+    ) -> dict[str, Any]:
+        calls.append(dict(params or {}))
+        raise MspError(-32001, "busy", kind="backpressured", data={"retryable": True})
+
+    monkeypatch.setattr(client, "request", request)
+    try:
+        with pytest.raises(MspError, match="busy"):
+            await client.command("turn/start", {"sessionId": "s"}, max_attempts=2)
+        assert len(calls) == 2
+        assert calls[0]["commandId"] == calls[1]["commandId"]
+    finally:
+        await client.close()
+
+
 async def test_malformed_response_is_protocol_error(tmp_path: Path) -> None:
     client = await _spawn(tmp_path, FAKE_MSP_BAD_RESPONSE="1")
     try:

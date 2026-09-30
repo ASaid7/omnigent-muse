@@ -390,8 +390,9 @@ class MspClient:
         """Send one idempotent command (same ``commandId`` across retries).
 
         Retries the bounded attempt budget when the host reports
-        backpressure (``backpressured`` / ``overloaded`` kind, or an
-        explicit ``retryable`` flag); every other error returns at once.
+        an explicit ``retryable=True`` flag. The backpressure kinds
+        (``backpressured`` / ``overloaded``) are a fallback only when the
+        flag is absent or not boolean; explicit ``False`` never retries.
         """
         command_params = dict(params)
         command_params["commandId"] = command_id or mint_command_id()
@@ -402,7 +403,11 @@ class MspClient:
                 return await self.request(method, command_params, timeout=timeout)
             except MspError as exc:
                 last_error = exc
-                retryable = exc.retryable or exc.kind in _COMMAND_RETRYABLE_KINDS
+                retryable = (
+                    exc.retryable
+                    if exc.retryable is not None
+                    else exc.kind in _COMMAND_RETRYABLE_KINDS
+                )
                 if not retryable or attempt == attempts:
                     raise
                 logger.debug(
