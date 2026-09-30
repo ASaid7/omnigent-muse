@@ -275,12 +275,14 @@ async def test_host_death_mid_turn(tmp_path: Path) -> None:
     client = await _spawn(tmp_path, FAKE_MSP_SCENARIO="die_on_turn")
     try:
         session_id = (await client.start_session())["sessionId"]
-        with client.open_stream(session_id) as stream:
-            with pytest.raises(MspConnectionClosed):
-                turn_id = await client.send_turn(
-                    session_id, [{"type": "text", "text": "hi"}]
-                )
-                [e async for e in stream.follow(turn_id)]
+        with (
+            client.open_stream(session_id) as stream,
+            pytest.raises(MspConnectionClosed),
+        ):
+            turn_id = await client.send_turn(
+                session_id, [{"type": "text", "text": "hi"}]
+            )
+            [e async for e in stream.follow(turn_id)]
     finally:
         await client.close()
 
@@ -394,7 +396,9 @@ async def test_pending_request_reports_closed_when_writer_cancelled(
         await client.close()
 
 
-@pytest.mark.parametrize("exit_mode", ["cancel", "yield", "complete", "eof", "both_ready"])
+@pytest.mark.parametrize(
+    "exit_mode", ["cancel", "yield", "complete", "eof", "both_ready"]
+)
 async def test_follow_joins_helpers_on_every_exit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exit_mode: str
 ) -> None:
@@ -415,9 +419,10 @@ async def test_follow_joins_helpers_on_every_exit(
     with client.open_stream("s") as stream:
         iterator = stream.follow("t")
         if exit_mode == "yield":
-            client._fan_out("item/delta", {
-                "sessionId": "s", "turnId": "t", "itemId": "i", "delta": "hello"
-            })
+            client._fan_out(
+                "item/delta",
+                {"sessionId": "s", "turnId": "t", "itemId": "i", "delta": "hello"},
+            )
         elif exit_mode in {"complete", "both_ready"}:
             client._fan_out("turn/completed", {"sessionId": "s", "turnId": "t"})
             if exit_mode == "both_ready":
@@ -436,7 +441,9 @@ async def test_follow_joins_helpers_on_every_exit(
                         await consumer
                 else:
                     event = await consumer
-                    expected = MspTextDelta if exit_mode == "yield" else MspTurnCompleted
+                    expected = (
+                        MspTextDelta if exit_mode == "yield" else MspTurnCompleted
+                    )
                     assert isinstance(event, expected)
                 assert len(helpers) == 2
                 assert all(task.done() for task in helpers)
@@ -559,9 +566,7 @@ async def test_server_request_handler_response_and_self_eviction(
         return {"ok": True}
 
     client.set_server_request_handler(handler)
-    frame = {
-        "jsonrpc": "2.0", "id": 901, "method": "host/ping", "params": {"value": 1}
-    }
+    frame = {"jsonrpc": "2.0", "id": 901, "method": "host/ping", "params": {"value": 1}}
     try:
         client._route_frame(frame, json.dumps(frame))
         tasks = tuple(client._server_request_tasks)
@@ -589,7 +594,10 @@ async def test_approval_requested_event_shape() -> None:
     # Pure translation check (no host needed): unknown shapes are dropped,
     # known ones surface the approval id.
     translate = MspClient._translate_notification
-    assert translate("s", "t", "approval/requested", {"sessionId": "s", "turnId": "t"}) is None
+    assert (
+        translate("s", "t", "approval/requested", {"sessionId": "s", "turnId": "t"})
+        is None
+    )
     event = translate(
         "s",
         "t",
@@ -610,7 +618,9 @@ async def test_approval_requested_event_shape() -> None:
         ("turn/retracted", {}),
     ],
 )
-@pytest.mark.parametrize("scope", ["matching", "foreign_session", "foreign_turn", "missing_turn"])
+@pytest.mark.parametrize(
+    "scope", ["matching", "foreign_session", "foreign_turn", "missing_turn"]
+)
 def test_translation_checks_event_scope(
     method: str, payload: dict[str, Any], scope: str
 ) -> None:
@@ -629,24 +639,28 @@ async def test_follow_correlates_items_and_rejects_other_turns(tmp_path: Path) -
     client = await _spawn(tmp_path)
     original_deltas: list[dict[str, Any]] = []
     client.subscribe(
-        lambda method, params: original_deltas.append(params)
-        if method == "item/delta" else None
+        lambda method, params: (
+            original_deltas.append(params) if method == "item/delta" else None
+        )
     )
     try:
         with client.open_stream("s") as first, client.open_stream("s") as second:
             for turn, item in [("foreign", "i-other"), ("t", "i-own")]:
-                client._fan_out("item/started", {
-                    "sessionId": "s", "item": {"itemId": item, "turnId": turn}
-                })
-                client._fan_out("item/delta", {
-                    "sessionId": "s", "itemId": item, "delta": turn
-                })
-                client._fan_out("session/tokenUsage", {
-                    "sessionId": "s", "turnId": turn, "totalTokens": 3
-                })
-                client._fan_out("approval/requested", {
-                    "sessionId": "s", "turnId": turn, "approvalId": turn
-                })
+                client._fan_out(
+                    "item/started",
+                    {"sessionId": "s", "item": {"itemId": item, "turnId": turn}},
+                )
+                client._fan_out(
+                    "item/delta", {"sessionId": "s", "itemId": item, "delta": turn}
+                )
+                client._fan_out(
+                    "session/tokenUsage",
+                    {"sessionId": "s", "turnId": turn, "totalTokens": 3},
+                )
+                client._fan_out(
+                    "approval/requested",
+                    {"sessionId": "s", "turnId": turn, "approvalId": turn},
+                )
             for turn in ("foreign", "t"):
                 client._fan_out("turn/completed", {"sessionId": "s", "turnId": turn})
 
@@ -654,31 +668,48 @@ async def test_follow_correlates_items_and_rejects_other_turns(tmp_path: Path) -
                 return [event async for event in stream.follow(turn)]
 
             async with asyncio.timeout(2):
-                streams = await asyncio.gather(collect(first, "t"), collect(second, "foreign"))
+                streams = await asyncio.gather(
+                    collect(first, "t"), collect(second, "foreign")
+                )
             for turn, events in zip(("t", "foreign"), streams, strict=True):
-                assert [e.delta for e in events if isinstance(e, MspTextDelta)] == [turn]
+                assert [e.delta for e in events if isinstance(e, MspTextDelta)] == [
+                    turn
+                ]
                 assert len([e for e in events if isinstance(e, MspTokenUsage)]) == 1
-                assert [e.approval_id for e in events if isinstance(e, MspApprovalRequested)] == [turn]
-                assert [e.turn_id for e in events if isinstance(e, MspTurnCompleted)] == [turn]
+                assert [
+                    e.approval_id for e in events if isinstance(e, MspApprovalRequested)
+                ] == [turn]
+                assert [
+                    e.turn_id for e in events if isinstance(e, MspTurnCompleted)
+                ] == [turn]
         assert all("turnId" not in params for params in original_deltas)
     finally:
         await client.close()
 
 
 @pytest.mark.parametrize("item_state", ["unknown", "completed", "foreign_session"])
-async def test_follow_drops_unassociated_item_deltas(tmp_path: Path, item_state: str) -> None:
+async def test_follow_drops_unassociated_item_deltas(
+    tmp_path: Path, item_state: str
+) -> None:
     client = await _spawn(tmp_path)
     try:
         with client.open_stream("s") as stream:
             item = {"itemId": "i", "turnId": "t"}
             if item_state != "unknown":
-                client._fan_out("item/started", {
-                    "sessionId": "other" if item_state == "foreign_session" else "s",
-                    "item": item,
-                })
+                client._fan_out(
+                    "item/started",
+                    {
+                        "sessionId": "other"
+                        if item_state == "foreign_session"
+                        else "s",
+                        "item": item,
+                    },
+                )
             if item_state == "completed":
                 client._fan_out("item/completed", {"sessionId": "s", "item": item})
-            client._fan_out("item/delta", {"sessionId": "s", "itemId": "i", "delta": "drop"})
+            client._fan_out(
+                "item/delta", {"sessionId": "s", "itemId": "i", "delta": "drop"}
+            )
             client._fan_out("turn/completed", {"sessionId": "s", "turnId": "t"})
             async with asyncio.timeout(2):
                 events = [event async for event in stream.follow("t")]

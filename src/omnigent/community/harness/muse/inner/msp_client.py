@@ -24,9 +24,9 @@ import random
 import re
 import time
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Self
 
 from omnigent.inner import _proc
 
@@ -154,6 +154,25 @@ class MspClient:
     sees every notification, so observers never starve each other).
     """
 
+    # Instances are initialized by the async factory rather than __init__.
+    _proc: asyncio.subprocess.Process
+    _label: str
+    _pending: dict[int, asyncio.Future[JsonObject]]
+    _next_request_id: int
+    _write_queue: asyncio.Queue[tuple[bytes, asyncio.Future[JsonObject] | None]]
+    _subscribers: list[NotificationHandler]
+    _server_request_handler: ServerRequestHandler | None
+    _server_request_tasks: set[asyncio.Task[None]]
+    _recent_stderr: deque[str]
+    _closed: asyncio.Event
+    _close_error: BaseException | None
+    _did_close: bool
+    fingerprint: str | None
+    host_version: str | None
+    _reader_task: asyncio.Task[None]
+    _stderr_task: asyncio.Task[None]
+    _writer_task: asyncio.Task[None]
+
     def __init__(self) -> None:
         raise TypeError("Use MspClient.spawn()")
 
@@ -172,20 +191,18 @@ class MspClient:
         self = cls.__new__(cls)
         self._proc = proc
         self._label = label
-        self._pending: dict[int, asyncio.Future[JsonObject]] = {}
+        self._pending = {}
         self._next_request_id = 0
-        self._write_queue: asyncio.Queue[
-            tuple[bytes, asyncio.Future[JsonObject] | None]
-        ] = asyncio.Queue()
-        self._subscribers: list[NotificationHandler] = []
-        self._server_request_handler: ServerRequestHandler | None = None
-        self._server_request_tasks: set[asyncio.Task[None]] = set()
-        self._recent_stderr: deque[str] = deque(maxlen=_STDERR_RING_SIZE)
+        self._write_queue = asyncio.Queue()
+        self._subscribers = []
+        self._server_request_handler = None
+        self._server_request_tasks = set()
+        self._recent_stderr = deque(maxlen=_STDERR_RING_SIZE)
         self._closed = asyncio.Event()
-        self._close_error: BaseException | None = None
+        self._close_error = None
         self._did_close = False
-        self.fingerprint: str | None = None
-        self.host_version: str | None = None
+        self.fingerprint = None
+        self.host_version = None
         self._reader_task = asyncio.create_task(self._read_loop(), name="msp-stdout")
         self._stderr_task = asyncio.create_task(self._stderr_loop(), name="msp-stderr")
         self._writer_task = asyncio.create_task(self._writer_loop(), name="msp-stdin")
@@ -475,9 +492,7 @@ class MspClient:
                 finally:
                     self._write_queue.task_done()
         except asyncio.CancelledError:
-            self._finish(
-                MspConnectionClosed(f"{self._label}: connection is closed")
-            )
+            self._finish(MspConnectionClosed(f"{self._label}: connection is closed"))
 
     async def _write_once(self, encoded: bytes) -> None:
         proc = self._proc
@@ -523,8 +538,8 @@ class MspClient:
                 self._route_frame(frame, line)
         except asyncio.CancelledError:
             pass
-        except Exception as exc:  # noqa: BLE001 — the loop must fail futures, never die silent
-            logger.exception("%s: stdout reader error: %s", self._label, exc)
+        except Exception as exc:  # The loop must fail futures, never die silent.
+            logger.exception("%s: stdout reader error", self._label)
             self._finish(exc)
 
     def _route_frame(self, frame: JsonObject, line: str) -> None:
@@ -597,10 +612,8 @@ class MspClient:
         for handler in list(self._subscribers):
             try:
                 handler(method, params)
-            except Exception as exc:  # noqa: BLE001 — one bad subscriber must not starve others
-                logger.exception(
-                    "%s: notification subscriber failed: %s", self._label, exc
-                )
+            except Exception:  # One bad subscriber must not starve others.
+                logger.exception("%s: notification subscriber failed", self._label)
 
     async def _answer_server_request(
         self, request_id: int, method: str, params: JsonObject
@@ -733,7 +746,7 @@ class MspClient:
             await asyncio.gather(*tasks, return_exceptions=True)
             self._server_request_tasks.clear()
 
-    async def __aenter__(self) -> MspClient:
+    async def __aenter__(self) -> Self:
         return self
 
     async def __aexit__(self, *exc_info: object) -> None:
@@ -1049,9 +1062,7 @@ class TurnStream:
             turn_id = params.get("turnId")
             if not isinstance(turn_id, str):
                 turn_id = (
-                    self._item_turns.get(item_id)
-                    if isinstance(item_id, str)
-                    else None
+                    self._item_turns.get(item_id) if isinstance(item_id, str) else None
                 )
             if not isinstance(turn_id, str):
                 return
@@ -1059,7 +1070,7 @@ class TurnStream:
             params = {**params, "turnId": turn_id}
         self._queue.put_nowait((method, params))
 
-    async def follow(self, turn_id: str) -> AsyncIterator[MspEvent]:
+    async def follow(self, turn_id: str) -> AsyncGenerator[MspEvent, None]:
         """Yield this turn's stream events until its terminal record.
 
         Deltas are correlated through ``item/started``; unknown-item
@@ -1072,9 +1083,7 @@ class TurnStream:
             closed = asyncio.create_task(self._client.wait_closed())
             tasks = (get, closed)
             try:
-                done, _ = await asyncio.wait(
-                    tasks, return_when=asyncio.FIRST_COMPLETED
-                )
+                done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
             finally:
                 for task in tasks:
                     if not task.done():
@@ -1098,7 +1107,7 @@ class TurnStream:
             self._unsubscribe()
             self._item_turns.clear()
 
-    def __enter__(self) -> TurnStream:
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *exc_info: object) -> None:
