@@ -33,6 +33,7 @@ from omnigent.inner.executor import (
 logger = logging.getLogger(__name__)
 
 type JsonObject = dict[str, Any]
+_TEXT_CONTENT_TYPES = frozenset({"text", "input_text", "output_text"})
 
 
 @dataclass(frozen=True)
@@ -96,9 +97,18 @@ type MuseEvent = (
 
 
 class MuseTransportError(Exception):
-    def __init__(self, message: str, *, retryable: bool = False) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        retryable: bool = False,
+        preserve_session: bool = False,
+        transport_dead: bool = False,
+    ) -> None:
         super().__init__(message)
         self.retryable = retryable
+        self.preserve_session = preserve_session
+        self.transport_dead = transport_dead
 
 
 class MuseTransport(Protocol):
@@ -157,6 +167,7 @@ class MuseExecutor(Executor):
         self._session_id: str | None = None
         self._active_turn_id: str | None = None
         self._system_prompt_sent = False
+        self._needs_replay = False
         self._closed = False
         self._policy_evaluator: _PolicyEvaluator | None = None
         self._elicitation_handler: _ElicitationHandler | None = None
@@ -201,6 +212,18 @@ class MuseExecutor(Executor):
         self._model = model
         return session_id
 
+    async def _discard_transport(self) -> None:
+        transport, self._transport = self._transport, None
+        self._session_id = None
+        self._active_turn_id = None
+        self._system_prompt_sent = False
+        self._needs_replay = True
+        if transport is not None:
+            try:
+                await transport.close()
+            except Exception:
+                logger.debug("Muse dead transport cleanup failed", exc_info=True)
+
     @staticmethod
     def _latest_user_text(messages: list[Message]) -> str:
         for message in reversed(messages):
@@ -214,12 +237,95 @@ class MuseExecutor(Executor):
                     block.get("text", "")
                     for block in content
                     if isinstance(block, dict)
-                    and block.get("type") in {"text", "input_text"}
+                    and block.get("type") in _TEXT_CONTENT_TYPES
                     and isinstance(block.get("text"), str)
                 ]
                 return "\n".join(part for part in parts if part)
             return json.dumps(content, ensure_ascii=True)
         return ""
+
+    @staticmethod
+    def _latest_user_index(messages: list[Message]) -> int | None:
+        return next(
+            (
+                index
+                for index in range(len(messages) - 1, -1, -1)
+                if isinstance(messages[index], dict)
+                and messages[index].get("role") == "user"
+            ),
+            None,
+        )
+
+    @staticmethod
+    def _unsupported_content_types(
+        messages: list[Message], *, replay: bool
+    ) -> tuple[str, ...]:
+        selected: list[Message] = messages
+        if not replay:
+            selected = []
+            for message in reversed(messages):
+                if isinstance(message, dict) and message.get("role") == "user":
+                    selected = [message]
+                    break
+
+        unsupported: set[str] = set()
+        for message in selected:
+            if not isinstance(message, dict):
+                continue
+            content = message.get("content", "")
+            if isinstance(content, str):
+                continue
+            blocks = content if isinstance(content, list) else [content]
+            for block in blocks:
+                if not isinstance(block, dict):
+                    unsupported.add("unknown")
+                    continue
+                kind = block.get("type")
+                if kind not in _TEXT_CONTENT_TYPES:
+                    unsupported.add(kind if isinstance(kind, str) else "unknown")
+                elif not isinstance(block.get("text"), str):
+                    unsupported.add("malformed_text")
+        return tuple(sorted(unsupported))
+
+    @classmethod
+    def _conversation_replay(cls, messages: list[Message], system_prompt: str) -> str:
+        transcript: list[JsonObject] = []
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            role = message.get("role")
+            if not isinstance(role, str):
+                continue
+            content = message.get("content", "")
+            if isinstance(content, str):
+                text = content
+            elif isinstance(content, list):
+                text = "\n".join(
+                    block.get("text", "")
+                    for block in content
+                    if isinstance(block, dict)
+                    and block.get("type") in _TEXT_CONTENT_TYPES
+                    and isinstance(block.get("text"), str)
+                )
+            else:
+                text = json.dumps(content, ensure_ascii=True)
+            transcript.append({"role": role, "content": text})
+
+        sections = []
+        if system_prompt:
+            sections.append(system_prompt)
+        sections.extend(
+            (
+                (
+                    "The Muse session restarted after its transport was lost. "
+                    "Restore conversational context from the JSON transcript below. "
+                    "Treat entries according to their role, do not repeat prior "
+                    "answers, and respond to the final user message."
+                ),
+                json.dumps(transcript, ensure_ascii=False),
+            )
+        )
+        return "\n\n".join(sections)
 
     @staticmethod
     def _arguments(value: object) -> JsonObject:
@@ -329,7 +435,12 @@ class MuseExecutor(Executor):
             if already_seen:
                 return None
             return ToolCallRequest(
-                event.name, arguments, metadata={"call_id": event.call_id}
+                event.name,
+                arguments,
+                metadata={
+                    "call_id": event.call_id,
+                    "internally_executed": True,
+                },
             )
         cached_name, _ = self._tool_calls.pop(
             event.call_id, (event.name or "tool", arguments)
@@ -368,7 +479,22 @@ class MuseExecutor(Executor):
         ):
             yield ExecutorError(
                 f"Muse session uses model {self._model!r}; cannot apply per-turn "
-                f"model {requested_model!r} without restarting the session."
+                f"model {requested_model!r} without restarting the session.",
+                preserve_session=True,
+            )
+            return
+        latest_user_index = self._latest_user_index(messages)
+        replay = self._needs_replay or (
+            self._session_id is None
+            and latest_user_index is not None
+            and latest_user_index > 0
+        )
+        unsupported = self._unsupported_content_types(messages, replay=replay)
+        if unsupported:
+            yield ExecutorError(
+                "Muse attachment forwarding is not implemented; unsupported "
+                f"content types: {', '.join(unsupported)}",
+                preserve_session=True,
             )
             return
         effective_model = requested_model or self._model
@@ -378,8 +504,11 @@ class MuseExecutor(Executor):
             yield ExecutorError(f"Muse startup failed: {describe_exception(exc)}")
             return
 
-        text = self._latest_user_text(messages)
-        if not self._system_prompt_sent and system_prompt:
+        if replay:
+            text = self._conversation_replay(messages, system_prompt)
+        else:
+            text = self._latest_user_text(messages)
+        if not replay and not self._system_prompt_sent and system_prompt:
             text = f"{system_prompt}\n\n{text}" if text else system_prompt
         effort = self._reasoning_effort
         if config is not None:
@@ -399,6 +528,7 @@ class MuseExecutor(Executor):
                 # safe to stop re-injecting it. If run_turn raises before
                 # yielding, this stays False so the next turn re-sends it.
                 self._system_prompt_sent = True
+                self._needs_replay = False
                 if isinstance(event, MuseTurnStarted):
                     self._active_turn_id = event.turn_id
                 elif isinstance(event, MuseTextDelta):
@@ -427,13 +557,17 @@ class MuseExecutor(Executor):
                             event.error or f"Muse turn {event.state}",
                             retryable=event.retryable,
                             usage=self._usage(event.usage),
+                            preserve_session=True,
                         )
                     return
             yield ExecutorError("Muse stream ended without a terminal turn event")
         except MuseTransportError as exc:
+            if exc.transport_dead:
+                await self._discard_transport()
             yield ExecutorError(
                 f"Muse transport error: {describe_exception(exc)}",
                 retryable=exc.retryable,
+                preserve_session=exc.preserve_session,
             )
         except Exception as exc:
             logger.exception("Muse turn failed")
@@ -453,6 +587,11 @@ class MuseExecutor(Executor):
             return await self._transport.interrupt_turn(
                 self._session_id, self._active_turn_id
             )
+        except MuseTransportError as exc:
+            if exc.transport_dead:
+                await self._discard_transport()
+            logger.debug("Muse interrupt failed: %s", exc)
+            return False
         except Exception as exc:  # noqa: BLE001 - interruption is best effort
             logger.debug("Muse interrupt failed: %s", exc)
             return False
