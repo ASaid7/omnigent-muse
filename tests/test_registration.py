@@ -9,6 +9,7 @@ package). It is skipped automatically if omnigent isn't importable.
 from __future__ import annotations
 
 import importlib.metadata
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -59,7 +60,7 @@ def test_contribution_shape_and_capabilities():
     assert capabilities.integration_mode is IntegrationMode.CLI_SUBPROCESS
     assert capabilities.elicitation is Elicitation.JSONRPC
     assert capabilities.resume is Resume.NONE
-    assert capabilities.effort is EffortFamily.NONE
+    assert capabilities.effort is EffortFamily.CODEX_NATIVE
     assert capabilities.model_family is ModelFamily.MULTI
     assert capabilities.auth is AuthModel.OWN_AUTH
     assert capabilities.subagents is False
@@ -136,12 +137,60 @@ def test_build_spawn_env_returns_a_fresh_mapping():
     assert build_spawn_env(spec) == {"HARNESS_MUSE_MODEL": "muse-large"}
 
 
+def test_build_spawn_env_accepts_runner_workdir():
+    from omnigent.community.harness.muse.plugin import build_spawn_env
+
+    spec = SimpleNamespace(executor=SimpleNamespace(model="muse-large"))
+
+    assert build_spawn_env(spec, workdir=Path("/tmp/bundle")) == {
+        "HARNESS_MUSE_MODEL": "muse-large"
+    }
+
+
+def test_build_spawn_env_registers_all_runtime_options(monkeypatch):
+    from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
+
+    from omnigent.community.harness.muse.plugin import build_spawn_env
+
+    monkeypatch.setenv("MUSE_TEST_TOKEN", "token-value")
+    spec = SimpleNamespace(
+        executor=SimpleNamespace(
+            model="muse-large",
+            reasoning_effort="high",
+            config={
+                "approval_mode": "allowAll",
+                "provider": "echo",
+                "turn_idle_timeout": 45,
+                "env_passthrough": ["MUSE_TEST_TOKEN"],
+            },
+        ),
+        model=None,
+        os_env=OSEnvSpec(sandbox=OSEnvSandboxSpec(type="none")),
+    )
+
+    env = build_spawn_env(spec, cwd=Path("/tmp/workspace"))
+
+    assert env["HARNESS_MUSE_MODEL"] == "muse-large"
+    assert env["HARNESS_MUSE_CWD"] == "/tmp/workspace"
+    assert env["HARNESS_MUSE_APPROVAL_MODE"] == "allowAll"
+    assert env["HARNESS_MUSE_PROVIDER"] == "echo"
+    assert env["HARNESS_MUSE_REASONING_EFFORT"] == "high"
+    assert env["HARNESS_MUSE_TURN_IDLE_TIMEOUT"] == "45"
+    assert json.loads(env["HARNESS_MUSE_OS_ENV"])["sandbox"]["type"] == "none"
+    assert env["HARNESS_MUSE_ENV_PASSTHROUGH"] == "MUSE_TEST_TOKEN"
+    assert "MUSE_TEST_TOKEN" not in env
+
+
 @pytest.mark.skipif(
     not _plugin_entry_point_is_installed(),
     reason="omnigent-muse entry point is not installed in this environment",
 )
 def test_registered_in_omnigent():
     import omnigent.harness_plugins as hp
+    from omnigent.util.reasoning_effort import (
+        CODEX_NATIVE_EFFORTS,
+        efforts_for_harness,
+    )
 
     hp.reset_plugin_state_for_tests()
     assert "muse" in hp.valid_harnesses()
@@ -151,4 +200,5 @@ def test_registered_in_omnigent():
         == "omnigent.community.harness.muse.inner.muse_harness"
     )
     assert any(r["id"] == "muse" and r["label"] == "Muse" for r in hp.harness_catalog())
+    assert efforts_for_harness("muse") == CODEX_NATIVE_EFFORTS
     assert hp.plugin_state().load_errors == {}
