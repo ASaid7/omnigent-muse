@@ -82,8 +82,53 @@ default. The `echo` provider is credential-free and useful for transport smoke
 tests; `meta` requires Muse-owned authentication through `muse login`,
 `muse auth set`, or `META_API_KEY`.
 
-`OSEnvSpec` is accepted and validated here, including its sandbox environment
-allowlist. Process-tree sandbox enforcement is tracked separately in issue #6.
+## Sandboxing
+
+When `os_env.sandbox` selects an active backend (`linux_bwrap` or
+`darwin_seatbelt`), `muse serve` is started through Omnigent's sandbox
+launcher, so Muse and every process it launches (including its shell tool)
+run under the spec's filesystem, network, and environment restrictions. The
+policy is resolved once when the harness starts, and every respawned
+transport reuses it.
+
+```yaml
+os_env:
+  type: caller_process
+  sandbox:
+    type: linux_bwrap
+    write_paths: ["."]             # the workspace is read-only unless granted
+```
+
+Inside the sandbox the harness:
+
+- runs the installed `muse-bin-<version>` binary directly (the `muse`
+  installer wrapper self-updates and reads files the sandbox hides) and sets
+  `MUSE_NO_AUTO_UPDATE=1`;
+- passes `--disable-sandbox`, because Muse's own shell sandbox needs user
+  namespaces that the outer sandbox denies — Omnigent's sandbox is the
+  boundary;
+- grants read-only access to Muse's config directory
+  (`$XDG_CONFIG_HOME/muse`, default `~/.config/muse`), write access to its
+  `auth.json` for token refresh, and write access to its data directory
+  (`$XDG_DATA_HOME/muse`, default `~/.local/share/muse`) for sessions.
+  Because settings and approval policy are read-only, Muse cannot persist
+  "always allow" approvals from a sandboxed session.
+
+`sandbox.type: none` (or no `os_env`) leaves Muse unsandboxed. These
+configurations fail before `muse serve` starts, never falling back to an
+unsandboxed launch:
+
+- a backend that cannot confine the Muse process tree (e.g.
+  `windows_jobobject`) or that is unavailable on this host (e.g. `bwrap`
+  missing);
+- `allow_network: false` with any provider except `echo` — the `meta` and
+  `local` providers need the network;
+- a `muse` installer wrapper whose selected binary is not installed.
+
+On Ubuntu 24.04+ unprivileged bubblewrap also needs an AppArmor profile that
+grants `userns` to `/usr/bin/bwrap`. With an editable `omnigent` install
+(such as the sibling checkout used for local development), add that checkout to
+`sandbox.read_paths`: the launcher imports `omnigent` inside the sandbox.
 
 ## License
 

@@ -33,6 +33,7 @@ from .muse_executor import (
     MuseTurnFinished,
     MuseTurnStarted,
 )
+from .sandbox_launch import MuseSandbox
 
 JsonObject = dict[str, Any]
 _DEFAULT_TURN_IDLE_TIMEOUT = 300.0
@@ -72,6 +73,7 @@ class MspTransport:
         env_passthrough: Sequence[str] = (),
         provider: str | None = None,
         idle_timeout: float = _DEFAULT_TURN_IDLE_TIMEOUT,
+        sandbox: MuseSandbox | None = None,
     ) -> None:
         if idle_timeout <= 0:
             raise ValueError("idle_timeout must be greater than zero")
@@ -82,6 +84,7 @@ class MspTransport:
         self._env_passthrough = tuple(env_passthrough)
         self._provider = provider
         self._idle_timeout = idle_timeout
+        self._sandbox = sandbox
         self._approval_requirements: dict[tuple[str, str], JsonObject] = {}
         self._item_kinds: dict[str, str] = {}
 
@@ -95,44 +98,51 @@ class MspTransport:
         env_passthrough: Sequence[str] = (),
         provider: str | None = None,
         idle_timeout: float = _DEFAULT_TURN_IDLE_TIMEOUT,
+        sandbox: MuseSandbox | None = None,
     ) -> MspTransport:
-        binary = executable or os.environ.get("OMNIGENT_MUSE_PATH") or "muse"
-        argv = [binary, "serve"]
-        if provider is not None:
-            argv.extend(("--provider", provider))
-        client = await MspClient.spawn(
-            argv,
-            cwd=cwd,
-            env=clean_agent_env(extra_allowed=env_passthrough, source=env),
-            client_version=_package_version(),
-            client_title="Omnigent Muse",
-        )
-        return cls(
-            client,
+        transport = cls(
             executable=executable,
             cwd=cwd,
             env=env,
             env_passthrough=env_passthrough,
             provider=provider,
             idle_timeout=idle_timeout,
+            sandbox=sandbox,
         )
+        transport._client = await transport._spawn_client()
+        return transport
 
     async def _get_client(self) -> MspClient:
         if self._client is None:
-            binary = self._executable or os.environ.get("OMNIGENT_MUSE_PATH") or "muse"
-            argv = [binary, "serve"]
-            if self._provider is not None:
-                argv.extend(("--provider", self._provider))
-            self._client = await MspClient.spawn(
-                argv,
+            self._client = await self._spawn_client()
+        return self._client
+
+    async def _spawn_client(self) -> MspClient:
+        binary = self._executable or os.environ.get("OMNIGENT_MUSE_PATH") or "muse"
+        args = ["serve"]
+        if self._provider is not None:
+            args.extend(("--provider", self._provider))
+        env = clean_agent_env(extra_allowed=self._env_passthrough, source=self._env)
+        if self._sandbox is None:
+            return await MspClient.spawn(
+                [binary, *args],
                 cwd=self._cwd,
-                env=clean_agent_env(
-                    extra_allowed=self._env_passthrough, source=self._env
-                ),
+                env=env,
                 client_version=_package_version(),
                 client_title="Omnigent Muse",
             )
-        return self._client
+        # Rebuilt from the same resolved sandbox on every (re)spawn.
+        launch = self._sandbox.launch(binary, args, env)
+        try:
+            return await MspClient.spawn(
+                list(launch.argv),
+                cwd=launch.cwd,
+                env=launch.env,
+                client_version=_package_version(),
+                client_title="Omnigent Muse",
+            )
+        finally:
+            launch.cleanup()
 
     async def start_session(
         self,

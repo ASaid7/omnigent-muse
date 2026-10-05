@@ -249,6 +249,143 @@ async def test_spawn_omits_provider_flag_when_not_configured(monkeypatch) -> Non
     await transport.close()
 
 
+class _RecordingLaunch:
+    def __init__(self, argv: tuple[str, ...], env: dict[str, str], cwd: str) -> None:
+        self.argv = argv
+        self.env = env
+        self.cwd = cwd
+        self.cleaned = False
+
+    def cleanup(self) -> None:
+        self.cleaned = True
+
+
+class _RecordingSandbox:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, list[str], dict[str, str]]] = []
+        self.launches: list[_RecordingLaunch] = []
+
+    def launch(
+        self, executable: str, args: list[str], env: dict[str, str]
+    ) -> _RecordingLaunch:
+        self.calls.append((executable, list(args), dict(env)))
+        launch = _RecordingLaunch(
+            (f"/tmp/launcher-{len(self.launches)}", *args, "--disable-sandbox"),
+            {**env, "MUSE_NO_AUTO_UPDATE": "1"},
+            "/sandboxed/workspace",
+        )
+        self.launches.append(launch)
+        return launch
+
+
+async def test_sandboxed_spawn_uses_launch_plan_and_removes_launcher(
+    monkeypatch,
+) -> None:
+    calls: list[tuple[list[str], dict[str, object]]] = []
+    sandbox = _RecordingSandbox()
+
+    async def fake_spawn(argv: list[str], **kwargs: object) -> _ScriptedClient:
+        assert not any(launch.cleaned for launch in sandbox.launches)
+        calls.append((list(argv), kwargs))
+        return _ScriptedClient()
+
+    monkeypatch.setattr(MspClient, "spawn", staticmethod(fake_spawn))
+    transport = await MspTransport.spawn(
+        executable="/custom/muse",
+        env={"HOME": "/home/test", "PATH": "/bin", "SECRET": "x"},
+        provider="meta",
+        sandbox=cast(Any, sandbox),
+    )
+
+    assert sandbox.calls == [
+        (
+            "/custom/muse",
+            ["serve", "--provider", "meta"],
+            {"HOME": "/home/test", "PATH": "/bin"},
+        )
+    ]
+    assert calls == [
+        (
+            ["/tmp/launcher-0", "serve", "--provider", "meta", "--disable-sandbox"],
+            {
+                "cwd": "/sandboxed/workspace",
+                "env": {
+                    "HOME": "/home/test",
+                    "PATH": "/bin",
+                    "MUSE_NO_AUTO_UPDATE": "1",
+                },
+                "client_version": calls[0][1]["client_version"],
+                "client_title": "Omnigent Muse",
+            },
+        )
+    ]
+    assert sandbox.launches[0].cleaned
+    await transport.close()
+
+
+async def test_sandboxed_spawn_failure_still_removes_launcher(monkeypatch) -> None:
+    sandbox = _RecordingSandbox()
+
+    async def failing_spawn(argv: list[str], **kwargs: object) -> _ScriptedClient:
+        raise MspConnectionClosed("host died during handshake")
+
+    monkeypatch.setattr(MspClient, "spawn", staticmethod(failing_spawn))
+    transport = MspTransport(sandbox=cast(Any, sandbox))
+
+    with pytest.raises(MuseTransportError, match="handshake"):
+        await transport.start_session(
+            workspace_root=None, model=None, approval_mode="onRequest"
+        )
+
+    assert [launch.cleaned for launch in sandbox.launches] == [True]
+
+
+async def test_sandbox_errors_propagate_without_spawning(monkeypatch) -> None:
+    class _BrokenSandbox:
+        def launch(self, *args: object) -> _RecordingLaunch:
+            raise RuntimeError("sandbox refused")
+
+    async def unexpected_spawn(argv: list[str], **kwargs: object) -> _ScriptedClient:
+        raise AssertionError("muse serve must not start unsandboxed")
+
+    monkeypatch.setattr(MspClient, "spawn", staticmethod(unexpected_spawn))
+    transport = MspTransport(sandbox=cast(Any, _BrokenSandbox()))
+
+    with pytest.raises(RuntimeError, match="sandbox refused"):
+        await transport.start_session(
+            workspace_root=None, model=None, approval_mode="onRequest"
+        )
+
+
+async def test_respawn_rebuilds_launch_from_same_sandbox(monkeypatch) -> None:
+    clients = [_ScriptedClient(), _ScriptedClient()]
+    pending = iter(clients)
+    argvs: list[list[str]] = []
+    sandbox = _RecordingSandbox()
+
+    async def fake_spawn(argv: list[str], **kwargs: object) -> _ScriptedClient:
+        argvs.append(list(argv))
+        return next(pending)
+
+    monkeypatch.setattr(MspClient, "spawn", staticmethod(fake_spawn))
+    transport = await MspTransport.spawn(
+        env={"HOME": "/home/test"}, provider="echo", sandbox=cast(Any, sandbox)
+    )
+    await transport._handle_error(MspConnectionClosed("dead"))
+    await transport._get_client()
+    await transport.close()
+
+    assert sandbox.calls[0] == sandbox.calls[1]
+    assert argvs == [
+        ["/tmp/launcher-0", "serve", "--provider", "echo", "--disable-sandbox"],
+        ["/tmp/launcher-1", "serve", "--provider", "echo", "--disable-sandbox"],
+    ]
+    assert all(launch.cleaned for launch in sandbox.launches)
+    # Teardown reaches both generations: the dead one on discard, the live
+    # one on close.
+    assert [client.closed for client in clients] == [True, True]
+
+
 async def test_adapter_runs_complete_turn(tmp_path: Path) -> None:
     transport = await _transport(tmp_path)
     try:
