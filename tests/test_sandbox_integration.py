@@ -11,7 +11,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-import omnigent.inner.sandbox
 import psutil
 import pytest
 from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
@@ -24,9 +23,6 @@ from omnigent.community.harness.muse.inner.sandbox_launch import (
 )
 
 FAKE_HOST = Path(__file__).parent / "fixtures" / "fake_msp_host.py"
-# The launcher imports omnigent inside the sandbox; an editable checkout
-# lives outside the venv, so it must be readable there.
-OMNIGENT_ROOT = Path(omnigent.inner.sandbox.__file__).resolve().parents[2]
 
 
 def _bwrap_usable() -> bool:
@@ -45,11 +41,17 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+@pytest.fixture(autouse=True)
+def _private_omnigent_data(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Keeps the private Muse homes out of the developer's ~/.omnigent.
+    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path / "omnigent"))
+
+
 def _spec(workspace: Path, *read_paths: Path) -> OSEnvSpec:
     return OSEnvSpec(
         sandbox=OSEnvSandboxSpec(
             type="linux_bwrap",
-            read_paths=[str(path) for path in (OMNIGENT_ROOT, *read_paths)],
+            read_paths=[str(path) for path in read_paths],
             write_paths=[str(workspace)],
         )
     )

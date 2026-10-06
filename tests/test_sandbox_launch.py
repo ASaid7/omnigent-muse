@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import os
 import stat
 from pathlib import Path
 
 import pytest
-from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
+from omnigent.inner.datamodel import CredentialProxySpec, OSEnvSandboxSpec, OSEnvSpec
 from omnigent.inner.sandbox import SandboxPolicy
 
 from omnigent.community.harness.muse.inner import sandbox_launch
@@ -104,6 +105,41 @@ def test_unsupported_backends_fail_explicitly(
 
 
 @pytest.mark.parametrize(
+    "sandbox_spec",
+    [
+        OSEnvSandboxSpec(type="linux_bwrap", egress_rules=["GET example.com/**"]),
+        OSEnvSandboxSpec(
+            type="linux_bwrap",
+            credential_proxy=CredentialProxySpec(entries=[]),
+            egress_rules=[],
+        ),
+    ],
+)
+def test_egress_and_credential_proxy_are_rejected(
+    tmp_path: Path,
+    resolved: list[tuple[OSEnvSpec, Path]],
+    sandbox_spec: OSEnvSandboxSpec,
+) -> None:
+    spec = OSEnvSpec(sandbox=sandbox_spec)
+
+    with pytest.raises(MuseSandboxError, match="egress proxy"):
+        MuseSandbox.resolve(spec, cwd=tmp_path, provider="meta")
+
+
+def test_seatbelt_is_rejected_until_core_supports_muse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        sandbox_launch,
+        "resolve_sandbox",
+        lambda spec, cwd: _policy(backend_type="darwin_seatbelt"),
+    )
+
+    with pytest.raises(MuseSandboxError, match="darwin_seatbelt"):
+        MuseSandbox.resolve(_bwrap_spec(), cwd=tmp_path, provider="meta")
+
+
+@pytest.mark.parametrize(
     "error", [OSError("bwrap not found"), NotImplementedError("no backend")]
 )
 def test_backend_resolution_failures_fail_explicitly(
@@ -144,39 +180,56 @@ def test_network_isolation_allows_offline_echo_provider(
     assert MuseSandbox.resolve(_bwrap_spec(), cwd=tmp_path, provider="echo")
 
 
+@pytest.fixture
+def omnigent_data(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    data = tmp_path / "omnigent"
+    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(data))
+    return data
+
+
+def _user_config(home: Path) -> Path:
+    config = home / ".config" / "muse"
+    config.mkdir(parents=True)
+    (config / "auth.json").write_text('{"providers": {}}')
+    (config / ".auth.json.lock").write_text("")
+    (config / "settings.json").write_text('{"model": "user"}')
+    (config / "trust.json").write_text("{}")
+    return config
+
+
 def test_launch_wraps_real_binary_and_delegates_shell_sandbox(
-    tmp_path: Path, resolved: list[tuple[OSEnvSpec, Path]]
+    tmp_path: Path, resolved: list[tuple[OSEnvSpec, Path]], omnigent_data: Path
 ) -> None:
     binary = _executable(tmp_path / "muse")
     home = tmp_path / "home"
-    (home / ".config" / "muse").mkdir(parents=True)
-    (home / ".config" / "muse" / "auth.json").write_text("{}")
     sandbox = MuseSandbox.resolve(_bwrap_spec(), cwd=tmp_path, provider="meta")
     assert sandbox is not None
 
     launch = sandbox.launch(
         str(binary),
         ["serve", "--provider", "meta"],
-        {"HOME": str(home), "PATH": "/bin"},
+        {"HOME": str(home), "PATH": "/bin", "META_API_KEY": "sk-test"},
     )
     try:
         launcher = Path(launch.argv[0])
         assert launcher.is_file() and os.access(launcher, os.X_OK)
         assert launch.argv[1:] == ("serve", "--provider", "meta", "--disable-sandbox")
         assert launch.cwd == str(tmp_path.resolve())
+        private = sandbox_launch.private_home(tmp_path.resolve())
+        assert private.is_relative_to(omnigent_data)
         assert launch.env == {
             "HOME": str(home),
             "PATH": "/bin",
             "MUSE_NO_AUTO_UPDATE": "1",
+            "XDG_CONFIG_HOME": str(private / "config"),
+            "XDG_DATA_HOME": str(private / "data"),
         }
 
         policy = launch.policy
-        config_dir = (home / ".config" / "muse").resolve()
-        data_dir = (home / ".local" / "share" / "muse").resolve()
-        assert policy.read_roots == [config_dir]
-        assert config_dir not in policy.write_roots
-        assert data_dir in policy.write_roots and data_dir.is_dir()
-        assert policy.write_files == [config_dir / "auth.json"]
+        assert policy.read_roots == [sandbox_launch._OMNIGENT_IMPORT_ROOT]
+        assert private.resolve() in policy.write_roots
+        assert (private / "data" / "muse").is_dir()
+        assert policy.write_files == []
         assert policy.spawn_env_allowlist == sorted(launch.env)
         assert str(binary.resolve()) in launcher.read_text()
     finally:
@@ -185,29 +238,107 @@ def test_launch_wraps_real_binary_and_delegates_shell_sandbox(
     launch.cleanup()  # idempotent
 
 
-def test_launch_honours_xdg_directories_from_spawn_env(
-    tmp_path: Path, resolved: list[tuple[OSEnvSpec, Path]]
+def test_launch_links_login_and_copies_settings(
+    tmp_path: Path, resolved: list[tuple[OSEnvSpec, Path]], omnigent_data: Path
 ) -> None:
     binary = _executable(tmp_path / "muse")
+    home = tmp_path / "home"
+    user = _user_config(home)
+    sandbox = MuseSandbox.resolve(_bwrap_spec(), cwd=tmp_path, provider="meta")
+    assert sandbox is not None
+
+    sandbox.launch(str(binary), ["serve"], {"HOME": str(home)}).cleanup()
+
+    private = sandbox_launch.private_home(tmp_path.resolve()) / "config" / "muse"
+    # A refresh written in either place is the same file.
+    assert os.path.samefile(private / "auth.json", user / "auth.json")
+    assert os.path.samefile(private / ".auth.json.lock", user / ".auth.json.lock")
+    # Settings are a private copy; trust decisions are not inherited.
+    assert (private / "settings.json").read_text() == '{"model": "user"}'
+    assert not os.path.samefile(private / "settings.json", user / "settings.json")
+    assert not (private / "trust.json").exists()
+
+
+def test_launch_resyncs_user_config_on_every_spawn(
+    tmp_path: Path, resolved: list[tuple[OSEnvSpec, Path]], omnigent_data: Path
+) -> None:
+    binary = _executable(tmp_path / "muse")
+    home = tmp_path / "home"
+    user = _user_config(home)
+    sandbox = MuseSandbox.resolve(_bwrap_spec(), cwd=tmp_path, provider="meta")
+    assert sandbox is not None
+    env = {"HOME": str(home)}
+    sandbox.launch(str(binary), ["serve"], env).cleanup()
+    private = sandbox_launch.private_home(tmp_path.resolve()) / "config" / "muse"
+
+    # Logging in again replaces the file rather than rewriting it.
+    (user / "auth.json").unlink()
+    (user / "auth.json").write_text('{"providers": {"meta": {}}}')
+    (user / "settings.json").write_text('{"model": "changed"}')
+    sandbox.launch(str(binary), ["serve"], env).cleanup()
+    assert os.path.samefile(private / "auth.json", user / "auth.json")
+    assert (private / "settings.json").read_text() == '{"model": "changed"}'
+
+    # The user logs out: the sandbox loses the login too.
+    (user / "auth.json").unlink()
+    sandbox.launch(str(binary), ["serve"], env).cleanup()
+    assert not (private / "auth.json").exists()
+
+
+def test_launch_honours_user_xdg_config_home(
+    tmp_path: Path, resolved: list[tuple[OSEnvSpec, Path]], omnigent_data: Path
+) -> None:
+    binary = _executable(tmp_path / "muse")
+    user = tmp_path / "cfg" / "muse"
+    user.mkdir(parents=True)
+    (user / "auth.json").write_text("{}")
     sandbox = MuseSandbox.resolve(_bwrap_spec(), cwd=tmp_path, provider="echo")
     assert sandbox is not None
-    env = {
-        "HOME": str(tmp_path / "home"),
-        "XDG_CONFIG_HOME": str(tmp_path / "cfg"),
-        "XDG_DATA_HOME": str(tmp_path / "data"),
-    }
+    env = {"HOME": str(tmp_path / "home"), "XDG_CONFIG_HOME": str(tmp_path / "cfg")}
 
     launch = sandbox.launch(str(binary), ["serve"], env)
     launch.cleanup()
 
-    assert launch.policy.read_roots == [(tmp_path / "cfg" / "muse").resolve()]
-    assert (tmp_path / "data" / "muse").resolve() in launch.policy.write_roots
-    # No credential file yet (e.g. META_API_KEY auth): nothing to grant.
-    assert launch.policy.write_files == []
+    private = sandbox_launch.private_home(tmp_path.resolve())
+    assert launch.env["XDG_CONFIG_HOME"] == str(private / "config")
+    assert os.path.samefile(
+        private / "config" / "muse" / "auth.json", user / "auth.json"
+    )
+
+
+def test_workspaces_get_separate_private_homes(
+    tmp_path: Path, omnigent_data: Path
+) -> None:
+    first = sandbox_launch.private_home(tmp_path / "a")
+    second = sandbox_launch.private_home(tmp_path / "b")
+
+    assert first != second
+    assert first == sandbox_launch.private_home(tmp_path / "a")
+
+
+def test_login_link_failure_is_explicit(
+    tmp_path: Path,
+    resolved: list[tuple[OSEnvSpec, Path]],
+    omnigent_data: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    binary = _executable(tmp_path / "muse")
+    home = tmp_path / "home"
+    _user_config(home)
+    sandbox = MuseSandbox.resolve(_bwrap_spec(), cwd=tmp_path, provider="meta")
+    assert sandbox is not None
+
+    def cross_device(src: object, dst: object) -> None:
+        raise OSError(18, "Invalid cross-device link")
+
+    monkeypatch.setattr(sandbox_launch.os, "link", cross_device)
+
+    with pytest.raises(MuseSandboxError, match="same filesystem"):
+        sandbox.launch(str(binary), ["serve"], {"HOME": str(home)})
 
 
 def test_each_launch_reuses_the_resolved_policy(
-    tmp_path: Path, resolved: list[tuple[OSEnvSpec, Path]]
+    tmp_path: Path, resolved: list[tuple[OSEnvSpec, Path]], omnigent_data: Path
 ) -> None:
     binary = _executable(tmp_path / "muse")
     sandbox = MuseSandbox.resolve(_bwrap_spec(), cwd=tmp_path, provider="echo")
@@ -249,6 +380,56 @@ def test_resolve_binary_rejects_wrapper_without_installed_binary(
 
     with pytest.raises(MuseSandboxError, match="muse-bin-1.4.2-R4684.1"):
         resolve_muse_binary(str(wrapper))
+
+
+def _installed(directory: Path, version: str, info: object) -> Path:
+    directory.mkdir(exist_ok=True)
+    _executable(directory / "muse")
+    (directory / ".muse-version").write_text(f"{version}\n")
+    (directory / ".muse-release-info.json").write_text(json.dumps(info))
+    return _executable(directory / f"muse-bin-{version}")
+
+
+def test_launch_exports_release_info_like_the_wrapper(
+    tmp_path: Path, resolved: list[tuple[OSEnvSpec, Path]], omnigent_data: Path
+) -> None:
+    info = {"channel": "muse-stable", "version": "1.4.3-R5018.1"}
+    _installed(tmp_path / "bin", "1.4.3-R5018.1", info)
+    sandbox = MuseSandbox.resolve(_bwrap_spec(), cwd=tmp_path, provider="echo")
+    assert sandbox is not None
+
+    launch = sandbox.launch(
+        str(tmp_path / "bin" / "muse"),
+        ["serve"],
+        {"HOME": str(tmp_path / "home"), "MUSE_RELEASE_INFO": "stale"},
+    )
+    launch.cleanup()
+
+    assert json.loads(launch.env["MUSE_RELEASE_INFO"]) == info
+
+
+@pytest.mark.parametrize("info", [{"version": "1.4.2-R4684.1"}, ["not", "a", "dict"]])
+def test_release_info_for_another_version_is_dropped(
+    tmp_path: Path, info: object
+) -> None:
+    binary = _installed(tmp_path, "1.4.3-R5018.1", info)
+
+    assert sandbox_launch.release_info(str(binary)) is None
+
+
+def test_launch_unsets_release_info_when_missing(
+    tmp_path: Path, resolved: list[tuple[OSEnvSpec, Path]], omnigent_data: Path
+) -> None:
+    binary = _executable(tmp_path / "muse")
+    sandbox = MuseSandbox.resolve(_bwrap_spec(), cwd=tmp_path, provider="echo")
+    assert sandbox is not None
+
+    launch = sandbox.launch(
+        str(binary), ["serve"], {"HOME": str(tmp_path), "MUSE_RELEASE_INFO": "stale"}
+    )
+    launch.cleanup()
+
+    assert "MUSE_RELEASE_INFO" not in launch.env
 
 
 def test_resolve_binary_rejects_missing_executable(tmp_path: Path) -> None:

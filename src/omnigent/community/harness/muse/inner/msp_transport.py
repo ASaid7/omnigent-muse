@@ -5,8 +5,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
 from typing import Any
 
 from omnigent.inner.agent_env import clean_agent_env
@@ -33,7 +34,7 @@ from .muse_executor import (
     MuseTurnFinished,
     MuseTurnStarted,
 )
-from .sandbox_launch import MuseSandbox
+from .sandbox_launch import MuseSandbox, MuseSandboxError
 
 JsonObject = dict[str, Any]
 _DEFAULT_TURN_IDLE_TIMEOUT = 300.0
@@ -77,6 +78,15 @@ class MspTransport:
     ) -> None:
         if idle_timeout <= 0:
             raise ValueError("idle_timeout must be greater than zero")
+        if (
+            sandbox is not None
+            and cwd is not None
+            and Path(cwd).resolve() != sandbox.workspace
+        ):
+            raise ValueError(
+                f"cwd {cwd!r} differs from the sandbox workspace "
+                f"{str(sandbox.workspace)!r}; a sandboxed Muse runs in its workspace"
+            )
         self._client = client
         self._executable = executable
         self._cwd = cwd
@@ -123,26 +133,33 @@ class MspTransport:
         if self._provider is not None:
             args.extend(("--provider", self._provider))
         env = clean_agent_env(extra_allowed=self._env_passthrough, source=self._env)
-        if self._sandbox is None:
+        argv, cwd = [binary, *args], self._cwd
+        cleanup: Callable[[], None] | None = None
+        if self._sandbox is not None:
+            # Rebuilt from the same resolved sandbox on every (re)spawn. The
+            # launch does file work (login links, launcher script), so it
+            # runs off the event loop.
+            try:
+                launch = await asyncio.to_thread(
+                    self._sandbox.launch, binary, args, env
+                )
+            except (MuseSandboxError, OSError) as exc:
+                raise MuseTransportError(
+                    f"cannot launch sandboxed Muse: {exc}", transport_dead=True
+                ) from exc
+            argv, cwd, env = list(launch.argv), launch.cwd, launch.env
+            cleanup = launch.cleanup
+        try:
             return await MspClient.spawn(
-                [binary, *args],
-                cwd=self._cwd,
+                argv,
+                cwd=cwd,
                 env=env,
                 client_version=_package_version(),
                 client_title="Omnigent Muse",
             )
-        # Rebuilt from the same resolved sandbox on every (re)spawn.
-        launch = self._sandbox.launch(binary, args, env)
-        try:
-            return await MspClient.spawn(
-                list(launch.argv),
-                cwd=launch.cwd,
-                env=launch.env,
-                client_version=_package_version(),
-                client_title="Omnigent Muse",
-            )
         finally:
-            launch.cleanup()
+            if cleanup is not None:
+                cleanup()
 
     async def start_session(
         self,

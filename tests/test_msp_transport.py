@@ -33,6 +33,10 @@ from omnigent.community.harness.muse.inner.muse_executor import (
     MuseTurnFinished,
     MuseTurnStarted,
 )
+from omnigent.community.harness.muse.inner.sandbox_launch import (
+    MuseSandbox,
+    MuseSandboxError,
+)
 
 FAKE_HOST = Path(__file__).parent / "fixtures" / "fake_msp_host.py"
 
@@ -355,6 +359,39 @@ async def test_sandbox_errors_propagate_without_spawning(monkeypatch) -> None:
         await transport.start_session(
             workspace_root=None, model=None, approval_mode="onRequest"
         )
+
+
+@pytest.mark.parametrize(
+    "error", [MuseSandboxError("login link failed"), OSError("disk full")]
+)
+async def test_launch_failures_become_transport_errors(
+    monkeypatch, error: Exception
+) -> None:
+    class _FailingSandbox:
+        def launch(self, *args: object) -> _RecordingLaunch:
+            raise error
+
+    async def unexpected_spawn(argv: list[str], **kwargs: object) -> _ScriptedClient:
+        raise AssertionError("muse serve must not start unsandboxed")
+
+    monkeypatch.setattr(MspClient, "spawn", staticmethod(unexpected_spawn))
+    transport = MspTransport(sandbox=cast(Any, _FailingSandbox()))
+
+    with pytest.raises(MuseTransportError, match=str(error)) as caught:
+        await transport.start_session(
+            workspace_root=None, model=None, approval_mode="onRequest"
+        )
+
+    assert not caught.value.retryable
+    assert caught.value.transport_dead
+
+
+def test_sandboxed_transport_rejects_a_different_cwd(tmp_path) -> None:
+    sandbox = MuseSandbox(cast(Any, None), tmp_path.resolve())
+
+    MspTransport(cwd=str(tmp_path), sandbox=sandbox)
+    with pytest.raises(ValueError, match="sandbox workspace"):
+        MspTransport(cwd=str(tmp_path / "elsewhere"), sandbox=sandbox)
 
 
 async def test_respawn_rebuilds_launch_from_same_sandbox(monkeypatch) -> None:
