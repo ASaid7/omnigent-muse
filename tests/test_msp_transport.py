@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import sys
+import threading
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any, Self, cast
@@ -384,6 +385,36 @@ async def test_launch_failures_become_transport_errors(
 
     assert not caught.value.retryable
     assert caught.value.transport_dead
+
+
+async def test_cancelled_spawn_removes_the_abandoned_launcher(monkeypatch) -> None:
+    release = threading.Event()
+
+    class _SlowSandbox(_RecordingSandbox):
+        def launch(
+            self, executable: str, args: list[str], env: dict[str, str]
+        ) -> _RecordingLaunch:
+            release.wait(5)
+            return super().launch(executable, args, env)
+
+    async def unexpected_spawn(argv: list[str], **kwargs: object) -> _ScriptedClient:
+        raise AssertionError("a cancelled spawn must not start muse serve")
+
+    monkeypatch.setattr(MspClient, "spawn", staticmethod(unexpected_spawn))
+    sandbox = _SlowSandbox()
+    transport = MspTransport(sandbox=cast(Any, sandbox))
+    spawning = asyncio.create_task(transport._get_client())
+    await asyncio.sleep(0.05)
+    spawning.cancel()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await spawning
+
+    for _ in range(200):
+        if sandbox.launches and sandbox.launches[0].cleaned:
+            break
+        await asyncio.sleep(0.01)
+    assert [launch.cleaned for launch in sandbox.launches] == [True]
 
 
 def test_sandboxed_transport_rejects_a_different_cwd(tmp_path) -> None:

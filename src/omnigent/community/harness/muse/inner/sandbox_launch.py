@@ -19,12 +19,13 @@ import json
 import os
 import re
 import shutil
+import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-import omnigent.inner.sandbox
 from omnigent.inner.datamodel import OSEnvSpec
+from omnigent.inner.sandbox import _project_root
 from omnigent.process_logging import data_dir
 from omnigent.sandbox import (
     SandboxPolicy,
@@ -66,16 +67,19 @@ _VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+-R[0-9]+(\.[0-9]+)?$")
 # the user's real login and vice versa. The lock is shared for the same
 # reason, so two refreshes cannot race each other.
 _LOGIN_FILES = ("auth.json", ".auth.json.lock")
+# Every XDG base directory Muse may read or write points into the private
+# home, so nothing it caches or records lands in the user's own directories.
+_XDG_KINDS = ("config", "data", "state", "cache")
 # Copied, so a settings change made inside the sandbox stays there.
 _COPIED_FILES = ("settings.json",)
 # Stripped so Muse always authenticates with the user's login.
 _API_KEY_ENV = "META_API_KEY"
 _RELEASE_INFO_ENV = "MUSE_RELEASE_INFO"
 # The launcher imports omnigent inside the sandbox from the directory core
-# puts on its sys.path (``omnigent.inner.sandbox._project_root``). For an
-# editable install that is a checkout outside the venv, which the sandbox
-# would otherwise hide.
-_OMNIGENT_IMPORT_ROOT = Path(omnigent.inner.sandbox.__file__).resolve().parents[2]
+# puts on its sys.path. For an editable install that is a checkout outside
+# the venv, which the sandbox would otherwise hide. Core's own (private)
+# helper keeps the grant and the launcher's sys.path in step.
+_OMNIGENT_IMPORT_ROOT = _project_root()
 
 
 class MuseSandboxError(RuntimeError):
@@ -147,26 +151,37 @@ def private_home(workspace: Path) -> Path:
 
 
 def _bridge_user_config(source: Path, target: Path) -> None:
-    """Link the user's login into ``target`` and copy their settings."""
+    """Link the user's login into ``target`` and copy their settings.
+
+    Every file is staged under a unique name and renamed into place, so
+    launches racing in one workspace, and a Muse already running there, never
+    see a missing or half-written file.
+    """
     for name in (*_LOGIN_FILES, *_COPIED_FILES):
         src, dst = source / name, target / name
         linked = name in _LOGIN_FILES and src.is_file() and dst.is_file()
         if linked and os.path.samefile(src, dst):
             continue
-        with contextlib.suppress(FileNotFoundError):
-            dst.unlink()
         if not src.is_file():
+            with contextlib.suppress(FileNotFoundError):
+                dst.unlink()
             continue
-        if name in _COPIED_FILES:
-            shutil.copyfile(src, dst)
-            continue
+        staged = target / f".{name}.omnigent-{uuid.uuid4().hex}"
         try:
-            os.link(src, dst)
-        except OSError as exc:
-            raise MuseSandboxError(
-                f"cannot link the Muse login {src} into {target}: {exc}; "
-                "the Omnigent data directory must be on the same filesystem"
-            ) from exc
+            if name in _COPIED_FILES:
+                shutil.copyfile(src, staged)
+            else:
+                try:
+                    os.link(src, staged)
+                except OSError as exc:
+                    raise MuseSandboxError(
+                        f"cannot link the Muse login {src} into {target}: {exc}; "
+                        "the Omnigent data directory must be on the same filesystem"
+                    ) from exc
+            os.replace(staged, dst)
+        finally:
+            with contextlib.suppress(FileNotFoundError):
+                staged.unlink()
 
 
 @dataclass(frozen=True)
@@ -265,15 +280,16 @@ class MuseSandbox:
         """
         binary = resolve_muse_binary(executable)
         home = private_home(self._workspace)
-        config_home, data_home = home / "config", home / "data"
-        for directory in (config_home / "muse", data_home / "muse"):
+        xdg = {f"XDG_{kind.upper()}_HOME": home / kind for kind in _XDG_KINDS}
+        for directory in xdg.values():
             directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-        _bridge_user_config(_user_config_dir(env), config_home / "muse")
+        for kind in ("XDG_CONFIG_HOME", "XDG_DATA_HOME"):
+            (xdg[kind] / "muse").mkdir(mode=0o700, exist_ok=True)
+        _bridge_user_config(_user_config_dir(env), xdg["XDG_CONFIG_HOME"] / "muse")
         spawn_env = {
             **env,
             "MUSE_NO_AUTO_UPDATE": "1",
-            "XDG_CONFIG_HOME": str(config_home),
-            "XDG_DATA_HOME": str(data_home),
+            **{name: str(path) for name, path in xdg.items()},
         }
         spawn_env.pop(_API_KEY_ENV, None)
         info = release_info(binary)

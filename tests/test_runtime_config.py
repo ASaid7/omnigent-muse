@@ -328,6 +328,26 @@ def test_executor_factory_resolves_sandbox_against_workspace(
     assert second._sandbox is first._sandbox
 
 
+def test_relative_workspace_is_made_absolute_for_muse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from omnigent.community.harness.muse.inner.muse_executor import MuseExecutor
+    from omnigent.community.harness.muse.inner.muse_harness import (
+        _build_muse_executor,
+    )
+
+    (tmp_path / "proj").mkdir()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HARNESS_MUSE_CWD", "proj")
+    monkeypatch.delenv(ENV_OS_ENV, raising=False)
+
+    executor = cast(MuseExecutor, _build_muse_executor())
+
+    # A sandboxed Muse runs inside the workspace, so a relative session
+    # root would resolve to proj/proj.
+    assert executor._cwd == str(tmp_path / "proj")
+
+
 def test_executor_without_os_env_is_unsandboxed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

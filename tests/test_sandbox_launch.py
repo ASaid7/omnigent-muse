@@ -223,6 +223,8 @@ def test_launch_wraps_real_binary_and_delegates_shell_sandbox(
             "MUSE_NO_AUTO_UPDATE": "1",
             "XDG_CONFIG_HOME": str(private / "config"),
             "XDG_DATA_HOME": str(private / "data"),
+            "XDG_STATE_HOME": str(private / "state"),
+            "XDG_CACHE_HOME": str(private / "cache"),
         }
 
         policy = launch.policy
@@ -257,6 +259,11 @@ def test_launch_links_login_and_copies_settings(
     assert (private / "settings.json").read_text() == '{"model": "user"}'
     assert not os.path.samefile(private / "settings.json", user / "settings.json")
     assert not (private / "trust.json").exists()
+    assert sorted(path.name for path in private.iterdir()) == [
+        ".auth.json.lock",
+        "auth.json",
+        "settings.json",
+    ]
 
 
 def test_launch_resyncs_user_config_on_every_spawn(
@@ -314,6 +321,26 @@ def test_workspaces_get_separate_private_homes(
 
     assert first != second
     assert first == sandbox_launch.private_home(tmp_path / "a")
+
+
+def test_launch_redirects_user_xdg_state_and_cache(
+    tmp_path: Path, resolved: list[tuple[OSEnvSpec, Path]], omnigent_data: Path
+) -> None:
+    binary = _executable(tmp_path / "muse")
+    sandbox = MuseSandbox.resolve(_bwrap_spec(), cwd=tmp_path, provider="echo")
+    assert sandbox is not None
+    env = {
+        "HOME": str(tmp_path / "home"),
+        "XDG_STATE_HOME": str(tmp_path / "user-state"),
+        "XDG_CACHE_HOME": str(tmp_path / "user-cache"),
+    }
+
+    launch = sandbox.launch(str(binary), ["serve"], env)
+    launch.cleanup()
+
+    private = sandbox_launch.private_home(tmp_path.resolve())
+    assert launch.env["XDG_STATE_HOME"] == str(private / "state")
+    assert launch.env["XDG_CACHE_HOME"] == str(private / "cache")
 
 
 def test_login_link_failure_is_explicit(

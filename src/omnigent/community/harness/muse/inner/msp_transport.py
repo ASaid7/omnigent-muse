@@ -34,7 +34,7 @@ from .muse_executor import (
     MuseTurnFinished,
     MuseTurnStarted,
 )
-from .sandbox_launch import MuseSandbox, MuseSandboxError
+from .sandbox_launch import MuseLaunch, MuseSandbox, MuseSandboxError
 
 JsonObject = dict[str, Any]
 _DEFAULT_TURN_IDLE_TIMEOUT = 300.0
@@ -59,6 +59,11 @@ def _object(value: object) -> JsonObject:
 
 def _first_str(*values: object) -> str | None:
     return next((value for value in values if isinstance(value, str) and value), None)
+
+
+def _cleanup_abandoned_launch(task: asyncio.Future[MuseLaunch]) -> None:
+    if not task.cancelled() and task.exception() is None:
+        task.result().cleanup()
 
 
 class MspTransport:
@@ -139,10 +144,15 @@ class MspTransport:
             # Rebuilt from the same resolved sandbox on every (re)spawn. The
             # launch does file work (login links, launcher script), so it
             # runs off the event loop.
+            pending = asyncio.ensure_future(
+                asyncio.to_thread(self._sandbox.launch, binary, args, env)
+            )
             try:
-                launch = await asyncio.to_thread(
-                    self._sandbox.launch, binary, args, env
-                )
+                launch = await asyncio.shield(pending)
+            except asyncio.CancelledError:
+                # The thread still finishes; remove the launcher it writes.
+                pending.add_done_callback(_cleanup_abandoned_launch)
+                raise
             except (MuseSandboxError, OSError) as exc:
                 raise MuseTransportError(
                     f"cannot launch sandboxed Muse: {exc}", transport_dead=True

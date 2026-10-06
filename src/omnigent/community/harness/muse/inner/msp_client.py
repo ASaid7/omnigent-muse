@@ -20,14 +20,17 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 import random
 import re
+import signal
 import time
 from collections import deque
 from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Self
 
+import psutil
 from omnigent.inner import _proc
 
 logger = logging.getLogger(__name__)
@@ -172,6 +175,62 @@ async def _wait_exit(proc: asyncio.subprocess.Process, timeout: float) -> bool:
     return proc.returncode is not None
 
 
+def _group_members(pgid: int) -> list[psutil.Process]:
+    """Return the live processes in process group ``pgid``.
+
+    The host is spawned in its own session, so its group id is its pid. While
+    any member is alive the kernel will not reuse that id, so every process
+    found here descends from the host, even after the host itself has exited.
+    """
+    if not hasattr(os, "getpgid"):
+        return []
+    members: list[psutil.Process] = []
+    for process in psutil.process_iter():
+        with contextlib.suppress(psutil.Error, OSError):
+            if os.getpgid(process.pid) == pgid:
+                members.append(process)
+    return members
+
+
+def _signal_group(pgid: int, sig: int) -> None:
+    """Send ``sig`` to group ``pgid`` if it still has members."""
+    killpg = getattr(os, "killpg", None)
+    if killpg is not None and _group_members(pgid):
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            killpg(pgid, sig)
+
+
+async def _wait_gone(processes: Sequence[psutil.Process], timeout: float) -> None:
+    """Wait, without blocking the loop, for ``processes`` to exit."""
+
+    def alive(process: psutil.Process) -> bool:
+        try:
+            return process.status() != psutil.STATUS_ZOMBIE
+        except psutil.Error:
+            return False
+
+    deadline = time.monotonic() + timeout
+    while any(map(alive, processes)) and time.monotonic() < deadline:
+        await asyncio.sleep(0.05)
+
+
+async def _stop_tree(proc: asyncio.subprocess.Process) -> None:
+    """SIGTERM the host's process tree, then SIGKILL whatever outlives grace.
+
+    The group is signalled even when the host has already exited (on stdin
+    EOF, or a crash): its descendants, a backgrounded shell job say, outlive
+    it unless a PID namespace reaps them, and macOS has none.
+    """
+    group = _group_members(proc.pid)
+    # Core covers a live leader on every platform (Windows has no groups).
+    _proc.terminate_tree(proc)
+    _signal_group(proc.pid, signal.SIGTERM)
+    await _wait_exit(proc, 10)
+    await _wait_gone(group, 5)
+    _proc.kill_tree(proc)
+    _signal_group(proc.pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+
+
 class MspClient:
     """One owned ``muse serve`` host plus a correlated view of its traffic.
 
@@ -290,9 +349,6 @@ class MspClient:
             )
         except OSError as exc:
             raise MspConnectionClosed(f"could not spawn {argv[0]!r}: {exc}") from exc
-        # Record the group while the leader is alive so close() can still
-        # signal descendants after the leader itself has exited.
-        _proc.remember_process_group(proc)
         return await cls._create(
             proc,
             init_timeout=init_timeout,
@@ -747,20 +803,12 @@ class MspClient:
         proc = self._proc
         self._writer_task.cancel()
         try:
-            # Snapshot the live tree while the leader can still vouch for it;
-            # teardown only signals descendants it has observed.
-            _proc.refresh_process_tree(proc)
             if proc is not None and proc.returncode is None and proc.stdin is not None:
                 with contextlib.suppress(BrokenPipeError, ConnectionResetError):
                     proc.stdin.close()
                 await _wait_exit(proc, 30)
             if proc is not None:
-                # Signal the group even when the host exited on EOF: its
-                # descendants (a backgrounded shell job, say) outlive it
-                # unless a PID namespace reaps them, and macOS has none.
-                _proc.terminate_tree(proc, grace=5)
-                await _wait_exit(proc, 10)
-                _proc.kill_tree(proc)
+                await _stop_tree(proc)
                 # wait() also waits for the stdio pipes, which a descendant
                 # that left the process group can hold open indefinitely.
                 with contextlib.suppress(OSError, TimeoutError):
