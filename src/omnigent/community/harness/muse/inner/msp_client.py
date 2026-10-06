@@ -161,6 +161,17 @@ NotificationHandler = Callable[[str, JsonObject], None]
 ServerRequestHandler = Callable[[str, JsonObject], Awaitable[JsonObject]]
 
 
+async def _wait_exit(proc: asyncio.subprocess.Process, timeout: float) -> bool:
+    """Wait for ``proc`` to exit, without waiting for its stdio pipes.
+
+    :returns: ``True`` once the process has exited, ``False`` on timeout.
+    """
+    deadline = time.monotonic() + timeout
+    while proc.returncode is None and time.monotonic() < deadline:
+        await asyncio.sleep(0.05)
+    return proc.returncode is not None
+
+
 class MspClient:
     """One owned ``muse serve`` host plus a correlated view of its traffic.
 
@@ -279,6 +290,9 @@ class MspClient:
             )
         except OSError as exc:
             raise MspConnectionClosed(f"could not spawn {argv[0]!r}: {exc}") from exc
+        # Record the group while the leader is alive so close() can still
+        # signal descendants after the leader itself has exited.
+        _proc.remember_process_group(proc)
         return await cls._create(
             proc,
             init_timeout=init_timeout,
@@ -733,22 +747,24 @@ class MspClient:
         proc = self._proc
         self._writer_task.cancel()
         try:
+            # Snapshot the live tree while the leader can still vouch for it;
+            # teardown only signals descendants it has observed.
+            _proc.refresh_process_tree(proc)
             if proc is not None and proc.returncode is None and proc.stdin is not None:
                 with contextlib.suppress(BrokenPipeError, ConnectionResetError):
                     proc.stdin.close()
-                try:
-                    async with asyncio.timeout(30):
-                        await proc.wait()
-                except TimeoutError:
-                    pass
-            if proc is not None and proc.returncode is None:
+                await _wait_exit(proc, 30)
+            if proc is not None:
+                # Signal the group even when the host exited on EOF: its
+                # descendants (a backgrounded shell job, say) outlive it
+                # unless a PID namespace reaps them, and macOS has none.
                 _proc.terminate_tree(proc, grace=5)
-                try:
+                await _wait_exit(proc, 10)
+                _proc.kill_tree(proc)
+                # wait() also waits for the stdio pipes, which a descendant
+                # that left the process group can hold open indefinitely.
+                with contextlib.suppress(OSError, TimeoutError):
                     async with asyncio.timeout(10):
-                        await proc.wait()
-                except TimeoutError:
-                    _proc.kill_tree(proc)
-                    with contextlib.suppress(OSError):
                         await proc.wait()
         finally:
             self._finish(MspConnectionClosed(f"{self._label}: client closed"))

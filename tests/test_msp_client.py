@@ -16,6 +16,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
+import psutil
 import pytest
 
 from omnigent.community.harness.muse.inner.msp_client import (
@@ -470,6 +471,24 @@ async def test_close_reaps_child(tmp_path: Path) -> None:
     assert client.closed
     assert client._proc.returncode is not None
     await client.close()  # idempotent
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups")
+async def test_close_reaps_descendants_after_host_exits(tmp_path: Path) -> None:
+    # The host exits cleanly on stdin EOF, leaving a backgrounded child behind.
+    host = tmp_path / "host.sh"
+    host.write_text(
+        "#!/bin/sh\n"
+        f'sleep 300 & echo $! > "{tmp_path}/child.pid"\n'
+        f"exec {sys.executable} -u {FAKE_HOST}\n"
+    )
+    host.chmod(0o755)
+    client = await MspClient.spawn([str(host)], env=_spawn_env(tmp_path), label="test")
+    child = psutil.Process(int((tmp_path / "child.pid").read_text()))
+    await client.close()
+    assert client._proc.returncode == 0
+    _, alive = psutil.wait_procs([child], timeout=10)
+    assert alive == []
 
 
 async def test_banner_line_tolerated(tmp_path: Path) -> None:
