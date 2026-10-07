@@ -14,15 +14,19 @@ silently running Muse unconfined.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
+import errno
 import hashlib
 import json
 import os
 import re
 import shutil
+import stat
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import BinaryIO
 
 from omnigent.inner.datamodel import OSEnvSpec
 from omnigent.inner.sandbox import _project_root
@@ -62,14 +66,25 @@ _RELEASE_INFO_FILE = ".muse-release-info.json"
 _VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+-R[0-9]+(\.[0-9]+)?$")
 # Sandboxed Muse runs from a private home so nothing it writes (plugins,
 # skills, memory, settings) is loaded later by the user's unsandboxed Muse.
-# The login is hard-linked in, the way core bridges Codex's credential store:
-# a hard link shares the inode, so a token refresh inside the sandbox reaches
-# the user's real login and vice versa. The lock is shared for the same
-# reason, so two refreshes cannot race each other.
-_LOGIN_FILES = ("auth.json", ".auth.json.lock")
+# The login is copied in, never linked, so nothing written inside the sandbox
+# reaches the user's own login; a refresh inside the sandbox stays private
+# (see _bridge_login). The login lock is not shared either: the two sides
+# never write the same file, and sandboxed code holding a shared lock could
+# stall the user's own refreshes.
+_LOGIN = "auth.json"
+_LOGIN_LOCK = ".auth.json.lock"
+# Opens a directory without following a symlink planted in its place.
+_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 # Every XDG base directory Muse may read or write points into the private
 # home, so nothing it caches or records lands in the user's own directories.
-_XDG_KINDS = ("config", "data", "state", "cache")
+# The values are the XDG defaults relative to $HOME.
+_XDG_DEFAULTS = {
+    "config": ".config",
+    "data": ".local/share",
+    "state": ".local/state",
+    "cache": ".cache",
+}
+_XDG_KINDS = tuple(_XDG_DEFAULTS)
 # Copied, so a settings change made inside the sandbox stays there.
 _COPIED_FILES = ("settings.json",)
 # Stripped so Muse always authenticates with the user's login.
@@ -134,10 +149,16 @@ def release_info(binary: str) -> str | None:
     return text
 
 
-def _user_config_dir(env: Mapping[str, str]) -> Path:
-    """Return the user's Muse config directory as Muse computes it."""
+def _user_muse_dir(env: Mapping[str, str], kind: str) -> Path:
+    """Return the user's own Muse directory of XDG ``kind`` as Muse computes it.
+
+    :param env: The environment Muse would run with unsandboxed.
+    :param kind: An XDG base directory kind, e.g. ``"data"``.
+    :returns: A path such as ``~/.local/share/muse``.
+    """
     home = Path(env.get("HOME") or Path.home())
-    return Path(env.get("XDG_CONFIG_HOME") or home / ".config") / "muse"
+    base = env.get(f"XDG_{kind.upper()}_HOME") or home / _XDG_DEFAULTS[kind]
+    return Path(base) / "muse"
 
 
 def private_home(workspace: Path) -> Path:
@@ -150,38 +171,182 @@ def private_home(workspace: Path) -> Path:
     return data_dir() / "muse-sandbox" / digest
 
 
-def _bridge_user_config(source: Path, target: Path) -> None:
-    """Link the user's login into ``target`` and copy their settings.
+def _mask_around(path: Path, grants: Sequence[Path]) -> list[Path]:
+    """Return the paths that hide ``path`` except for the ``grants`` inside it.
 
-    Every file is staged under a unique name and renamed into place, so
-    launches racing in one workspace, and a Muse already running there, never
-    see a missing or half-written file.
+    A granted path (the workspace, the private home, a spec read/write path,
+    or the Muse binary's directory) inside ``path`` stays visible; everything
+    beside it is masked.
+
+    :param path: A resolved directory to hide, e.g. ``~/.local/share/muse``.
+    :param grants: Resolved granted roots.
+    :returns: ``[path]``, or its ungranted entries when a grant lies inside.
     """
-    for name in (*_LOGIN_FILES, *_COPIED_FILES):
-        src, dst = source / name, target / name
-        linked = name in _LOGIN_FILES and src.is_file() and dst.is_file()
-        if linked and os.path.samefile(src, dst):
-            continue
-        if not src.is_file():
-            with contextlib.suppress(FileNotFoundError):
-                dst.unlink()
-            continue
-        staged = target / f".{name}.omnigent-{uuid.uuid4().hex}"
-        try:
-            if name in _COPIED_FILES:
-                shutil.copyfile(src, staged)
+    # A symlink beside a grant is left to the rest of the policy: the backend
+    # cannot mask it, and its target may be anywhere on the host.
+    if path.is_symlink():
+        return []
+    inside = [grant for grant in grants if grant.is_relative_to(path)]
+    if not inside:
+        return [path]
+    if path in inside or not path.is_dir():
+        return []
+    try:
+        children = sorted(path.iterdir())
+    except OSError:
+        return [path]
+    return [masked for child in children for masked in _mask_around(child, inside)]
+
+
+def _identity(st: os.stat_result) -> str:
+    return f"{st.st_dev} {st.st_ino} {st.st_mtime_ns} {st.st_size}"
+
+
+def _open_private_dir(parent_fd: int, name: str) -> int:
+    """Open directory ``name`` under ``parent_fd``, creating it if needed.
+
+    The private home is writable from inside the sandbox, so anything else
+    found there (a planted symlink or file) is removed rather than followed;
+    every later file operation goes through the returned descriptor.
+    """
+    try:
+        return os.open(name, _DIR_FLAGS, dir_fd=parent_fd)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        if exc.errno not in (errno.ELOOP, errno.ENOTDIR):
+            raise
+        os.unlink(name, dir_fd=parent_fd)
+    with contextlib.suppress(FileExistsError):
+        os.mkdir(name, 0o700, dir_fd=parent_fd)
+    return os.open(name, _DIR_FLAGS, dir_fd=parent_fd)
+
+
+def _remove_at(dir_fd: int, name: str) -> None:
+    """Remove ``name`` from ``dir_fd``, even a directory planted in its place."""
+    try:
+        st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    if stat.S_ISDIR(st.st_mode):
+        shutil.rmtree(name, dir_fd=dir_fd)
+    else:
+        os.unlink(name, dir_fd=dir_fd)
+
+
+def _write_at(dir_fd: int, name: str, data: BinaryIO | bytes) -> None:
+    """Atomically replace ``name`` in ``dir_fd`` with ``data``, readable by the user only.
+
+    Staging under a unique name and renaming means launches racing in one
+    workspace, and a Muse already running there, never see a missing or
+    half-written file.
+    """
+    staged = f".{name}.omnigent-{uuid.uuid4().hex}"
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+        with os.fdopen(os.open(staged, flags, 0o600, dir_fd=dir_fd), "wb") as out:
+            if isinstance(data, bytes):
+                out.write(data)
             else:
-                try:
-                    os.link(src, staged)
-                except OSError as exc:
-                    raise MuseSandboxError(
-                        f"cannot link the Muse login {src} into {target}: {exc}; "
-                        "the Omnigent data directory must be on the same filesystem"
-                    ) from exc
-            os.replace(staged, dst)
-        finally:
-            with contextlib.suppress(FileNotFoundError):
-                staged.unlink()
+                shutil.copyfileobj(data, out)
+        with contextlib.suppress(FileNotFoundError):
+            if stat.S_ISDIR(
+                os.stat(name, dir_fd=dir_fd, follow_symlinks=False).st_mode
+            ):
+                shutil.rmtree(name, dir_fd=dir_fd)
+        os.replace(staged, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(staged, dir_fd=dir_fd)
+
+
+def _copy_to(src: Path, dir_fd: int, name: str) -> os.stat_result | None:
+    """Copy ``src`` over ``name`` in ``dir_fd``.
+
+    :returns: The status of the file copied, or ``None`` when ``src`` is
+        missing or cannot be read.
+    """
+    try:
+        fd = os.open(src, os.O_RDONLY | os.O_CLOEXEC)
+    except (FileNotFoundError, PermissionError):
+        return None
+    with os.fdopen(fd, "rb") as data:
+        copied = os.fstat(fd)
+        if not stat.S_ISREG(copied.st_mode):
+            return None
+        _write_at(dir_fd, name, data)
+    return copied
+
+
+def _read_at(dir_fd: int, name: str) -> str | None:
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dir_fd)
+    except FileNotFoundError:
+        return None
+    with os.fdopen(fd) as record:
+        return record.read()
+
+
+def _bridge_login(user: Path, dir_fd: int, records_fd: int, record: str) -> None:
+    """Copy the user's login ``user`` into the private config ``dir_fd``.
+
+    A copy, not a link, so nothing written inside the sandbox reaches the
+    user's own login. Muse refreshes by renaming a new file over
+    ``auth.json``; that refresh is kept while the user's login is the one
+    last copied, and replaced once the user logs in again. Which login was
+    last copied is recorded as ``record`` in ``records_fd``, next to the
+    private home rather than in it, so the sandbox cannot edit it.
+    """
+    try:
+        current = _identity(user.stat())
+        private = os.stat(_LOGIN, dir_fd=dir_fd, follow_symlinks=False)
+    except (FileNotFoundError, PermissionError):
+        pass
+    else:
+        if stat.S_ISREG(private.st_mode) and _read_at(records_fd, record) == current:
+            return
+    copied = _copy_to(user, dir_fd, _LOGIN)
+    if copied is None:
+        # Logged out (or the login is unreadable): the sandbox loses it too.
+        _remove_at(dir_fd, _LOGIN)
+        _remove_at(records_fd, record)
+    else:
+        _write_at(records_fd, record, _identity(copied).encode())
+
+
+def _unshare_login_lock(user_config: Path, dir_fd: int) -> None:
+    """Remove a login lock hard-linked in by an earlier version of this harness."""
+    with contextlib.suppress(FileNotFoundError, PermissionError):
+        private = os.stat(_LOGIN_LOCK, dir_fd=dir_fd, follow_symlinks=False)
+        if os.path.samestat(private, (user_config / _LOGIN_LOCK).stat()):
+            os.unlink(_LOGIN_LOCK, dir_fd=dir_fd)
+
+
+def _prepare_private_home(home: Path, user_config: Path) -> None:
+    """Lay out the private home and bridge the user's login and settings.
+
+    :param home: The private home, e.g. ``~/.omnigent/muse-sandbox/<digest>``.
+    :param user_config: The user's Muse config directory.
+    """
+    home.parent.mkdir(parents=True, exist_ok=True)
+    with contextlib.ExitStack() as stack:
+
+        def track(fd: int) -> int:
+            stack.callback(os.close, fd)
+            return fd
+
+        homes_fd = track(
+            os.open(home.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        )
+        home_fd = track(_open_private_dir(homes_fd, home.name))
+        kinds = {kind: track(_open_private_dir(home_fd, kind)) for kind in _XDG_KINDS}
+        track(_open_private_dir(kinds["data"], "muse"))
+        config_fd = track(_open_private_dir(kinds["config"], "muse"))
+        _unshare_login_lock(user_config, config_fd)
+        _bridge_login(user_config / _LOGIN, config_fd, homes_fd, f"{home.name}.login")
+        for name in _COPIED_FILES:
+            if _copy_to(user_config / name, config_fd, name) is None:
+                _remove_at(config_fd, name)
 
 
 @dataclass(frozen=True)
@@ -274,18 +439,13 @@ class MuseSandbox:
         :param executable: Muse command name or path, e.g. ``"muse"``.
         :param args: Arguments after the executable, e.g. ``["serve"]``.
         :param env: The already-filtered environment for the Muse process.
-        :raises MuseSandboxError: The Muse binary cannot be resolved, or the
-            login cannot be linked into the private home.
+        :raises MuseSandboxError: The Muse binary cannot be resolved.
         :raises OSError: The private home or launcher cannot be written.
         """
         binary = resolve_muse_binary(executable)
         home = private_home(self._workspace)
+        _prepare_private_home(home, _user_muse_dir(env, "config"))
         xdg = {f"XDG_{kind.upper()}_HOME": home / kind for kind in _XDG_KINDS}
-        for directory in xdg.values():
-            directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-        for kind in ("XDG_CONFIG_HOME", "XDG_DATA_HOME"):
-            (xdg[kind] / "muse").mkdir(mode=0o700, exist_ok=True)
-        _bridge_user_config(_user_config_dir(env), xdg["XDG_CONFIG_HOME"] / "muse")
         spawn_env = {
             **env,
             "MUSE_NO_AUTO_UPDATE": "1",
@@ -301,6 +461,28 @@ class MuseSandbox:
         # Grant the home itself: the backends mask dotfiles only at the top
         # level of a granted root, so Muse's lock files below stay visible.
         policy = with_additional_write_roots(policy, [home])
+        # The user's own Muse directories stay hidden even where a broader
+        # grant covers them: core makes the binary's prefix (~/.local for
+        # ~/.local/bin/muse-bin-*) readable, which holds ~/.local/share/muse.
+        grants = [
+            path.resolve()
+            for path in (
+                *(policy.read_roots or []),
+                *policy.write_roots,
+                *policy.write_files,
+                *(policy.copy_on_write_roots or []),
+                self._workspace,
+                Path(binary).parent,
+            )
+        ]
+        masks = [
+            path
+            for kind in _XDG_KINDS
+            for path in _mask_around(_user_muse_dir(env, kind).resolve(), grants)
+        ]
+        policy = dataclasses.replace(
+            policy, mask_paths=[*(policy.mask_paths or []), *masks]
+        )
         policy = with_spawn_env_allowlist(policy, list(spawn_env))
         launcher = create_exec_launcher(binary, policy, cwd=str(self._workspace))
         return MuseLaunch(

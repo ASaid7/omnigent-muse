@@ -142,7 +142,7 @@ class MspTransport:
         cleanup: Callable[[], None] | None = None
         if self._sandbox is not None:
             # Rebuilt from the same resolved sandbox on every (re)spawn. The
-            # launch does file work (login links, launcher script), so it
+            # launch does file work (login copy, launcher script), so it
             # runs off the event loop.
             pending = asyncio.ensure_future(
                 asyncio.to_thread(self._sandbox.launch, binary, args, env)

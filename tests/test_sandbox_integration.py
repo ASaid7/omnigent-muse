@@ -69,8 +69,12 @@ async def test_restrictions_apply_to_descendants_and_die_with_teardown(
     workspace = tmp_path / "workspace"
     readonly = tmp_path / "readonly"
     outside = tmp_path / "outside"
-    for directory in (workspace, readonly, outside):
-        directory.mkdir()
+    home = tmp_path / "home"
+    muse_data = home / ".local" / "share" / "muse"
+    for directory in (workspace, readonly, outside, muse_data):
+        directory.mkdir(parents=True)
+    (home / ".local" / "visible").write_text("visible\n")
+    (muse_data / "session-index.db").write_text("sessions\n")
     probe = tmp_path / "bin" / "muse"
     probe.parent.mkdir()
     probe.write_text(
@@ -79,20 +83,25 @@ async def test_restrictions_apply_to_descendants_and_die_with_teardown(
         '  echo inside > "$PROBE_WORKSPACE/inside.txt"; echo "inside=$?"\n'
         '  echo denied > "$PROBE_READONLY/denied.txt"; echo "readonly=$?"\n'
         '  echo escaped > "$PROBE_OUTSIDE/escaped.txt"; echo "outside=$?"\n'
+        '  cat "$HOME/.local/visible"; echo "local=$?"\n'
+        '  cat "$HOME/.local/share/muse/session-index.db"; echo "muse_data=$?"\n'
         '\' > "$PROBE_WORKSPACE/probe.log" 2>&1\n'
         'echo "args=$*" >> "$PROBE_WORKSPACE/probe.log"\n'
         "sleep 300 &\n"
         f"exec {sys.executable} {FAKE_HOST}\n"
     )
     probe.chmod(0o755)
+    # ~/.local stands in for the prefix core grants around ~/.local/bin/muse.
     sandbox = MuseSandbox.resolve(
-        _spec(workspace, readonly, FAKE_HOST.parent), cwd=workspace, provider="echo"
+        _spec(workspace, readonly, FAKE_HOST.parent, home / ".local"),
+        cwd=workspace,
+        provider="echo",
     )
     assert sandbox is not None
     transport = await MspTransport.spawn(
         executable=str(probe),
         env={
-            "HOME": str(tmp_path / "home"),
+            "HOME": str(home),
             "PATH": "/usr/bin:/bin",
             "PROBE_WORKSPACE": str(workspace),
             "PROBE_READONLY": str(readonly),
@@ -116,6 +125,9 @@ async def test_restrictions_apply_to_descendants_and_die_with_teardown(
     assert "inside=0" in log
     assert "readonly=0" not in log
     assert "outside=0" not in log
+    assert "local=0" in log
+    assert "muse_data=0" not in log
+    assert "sessions" not in log
     assert "args=serve --provider echo --disable-sandbox" in log
     assert (workspace / "inside.txt").read_text() == "inside\n"
     assert not (readonly / "denied.txt").exists()

@@ -110,13 +110,17 @@ Inside the sandbox the harness:
   (default `~/.omnigent/...`), one per workspace, and grants write access to
   that home only. Sessions, plugins, skills, memory and settings written by a
   sandboxed run stay there, so the unsandboxed `muse` never loads them;
-- signs Muse in with your login: `auth.json` and its lock are hard-linked from
-  your Muse config directory (`$XDG_CONFIG_HOME/muse`, default
-  `~/.config/muse`), so a token refresh on either side reaches the other, and
-  `settings.json` is copied in. `trust.json` is not, so a sandboxed run starts
-  with no trusted workspaces. `META_API_KEY` is removed from Muse's
-  environment. The private home must be on the same filesystem as that config
-  directory.
+- signs Muse in with your login: `auth.json` and `settings.json` are copied
+  in from your Muse config directory (`$XDG_CONFIG_HOME/muse`, default
+  `~/.config/muse`). Nothing written inside the sandbox reaches your own
+  login: a token refresh made there stays in the private home, and is replaced
+  when you log in again (or dropped when you log out). `trust.json` is not
+  copied, so a sandboxed run starts with no trusted workspaces.
+  `META_API_KEY` is removed from Muse's environment;
+- hides your own Muse directories (`~/.config/muse`, `~/.local/share/muse`,
+  `~/.local/state/muse`, `~/.cache/muse`, or their `$XDG_*_HOME`
+  equivalents), which a broader read grant would otherwise expose. A path the
+  spec grants inside one of them stays visible.
 
 The login is readable inside the sandbox, so its shell tool can read your
 Muse token, as with Omnigent's Claude and Codex harnesses.
@@ -132,9 +136,7 @@ unsandboxed launch:
   under Omnigent's Seatbelt profile yet, so use `type: none` on macOS;
 - `allow_network: false` with any provider except `echo` — the `meta` and
   `local` providers need the network;
-- a `muse` installer wrapper whose selected binary is not installed;
-- a Muse login that cannot be hard-linked into the private home (it is on
-  another filesystem).
+- a `muse` installer wrapper whose selected binary is not installed.
 
 On Ubuntu 24.04+ unprivileged bubblewrap also needs an AppArmor profile that
 grants `userns` to `/usr/bin/bwrap`.
