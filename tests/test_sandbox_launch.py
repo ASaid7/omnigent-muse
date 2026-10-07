@@ -225,9 +225,11 @@ def test_launch_wraps_real_binary_and_delegates_shell_sandbox(
         assert launch.cwd == str(tmp_path.resolve())
         private = sandbox_launch.private_home(tmp_path.resolve())
         assert private.is_relative_to(omnigent_data)
+        # A passed-through META_API_KEY reaches Muse, as it does unsandboxed.
         assert launch.env == {
             "HOME": str(home),
             "PATH": "/bin",
+            "META_API_KEY": "sk-test",
             "MUSE_NO_AUTO_UPDATE": "1",
             "XDG_CONFIG_HOME": str(private / "config"),
             "XDG_DATA_HOME": str(private / "data"),

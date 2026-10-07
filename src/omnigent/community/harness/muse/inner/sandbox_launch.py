@@ -87,8 +87,6 @@ _XDG_DEFAULTS = {
 _XDG_KINDS = tuple(_XDG_DEFAULTS)
 # Copied, so a settings change made inside the sandbox stays there.
 _COPIED_FILES = ("settings.json",)
-# Stripped so Muse always authenticates with the user's login.
-_API_KEY_ENV = "META_API_KEY"
 _RELEASE_INFO_ENV = "MUSE_RELEASE_INFO"
 # The launcher imports omnigent inside the sandbox from the directory core
 # puts on its sys.path. For an editable install that is a checkout outside
@@ -451,7 +449,6 @@ class MuseSandbox:
             "MUSE_NO_AUTO_UPDATE": "1",
             **{name: str(path) for name, path in xdg.items()},
         }
-        spawn_env.pop(_API_KEY_ENV, None)
         info = release_info(binary)
         if info is None:
             spawn_env.pop(_RELEASE_INFO_ENV, None)

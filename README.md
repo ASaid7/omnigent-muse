@@ -119,7 +119,7 @@ Inside the sandbox the harness:
   login: a token refresh made there stays in the private home, and is replaced
   when you log in again (or dropped when you log out). `trust.json` is not
   copied, so a sandboxed run starts with no trusted workspaces.
-  `META_API_KEY` is removed from Muse's environment;
+  `META_API_KEY` reaches Muse only when it is passed through, as unsandboxed;
 - hides your own Muse directories (`~/.config/muse`, `~/.local/share/muse`,
   `~/.local/state/muse`, `~/.cache/muse`, or their `$XDG_*_HOME`
   equivalents), which a broader read grant would otherwise expose. A path the
