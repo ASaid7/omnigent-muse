@@ -82,6 +82,9 @@ default. The `echo` provider is credential-free and useful for transport smoke
 tests; `meta` requires Muse-owned authentication through `muse login`,
 `muse auth set`, or `META_API_KEY`.
 
+See [docs/authentication.md](docs/authentication.md) for per-provider setup,
+readiness checks, and troubleshooting authentication failures.
+
 ## Sandboxing
 
 When `os_env.sandbox` selects the `linux_bwrap` backend, `muse serve` is

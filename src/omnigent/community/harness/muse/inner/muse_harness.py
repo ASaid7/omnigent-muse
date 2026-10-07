@@ -45,6 +45,7 @@ def _build_muse_executor() -> Executor:
         cwd=cwd,
         approval_mode=config.approval_mode,
         reasoning_effort=config.reasoning_effort,
+        provider=config.provider,
     )
 
 
