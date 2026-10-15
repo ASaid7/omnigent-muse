@@ -155,7 +155,7 @@ unsandboxed launch:
   ```
 - `egress_rules`, `credential_proxy` and `git_ssh`: each needs a helper the
   parent starts (the egress proxy or the git SSH relay), which this harness
-  does not start yet;
+  does not start yet ([#30](https://github.com/R7L208/omnigent-muse/issues/30));
 - a write grant that covers the system temporary directory (e.g.
   `write_paths: ["/tmp"]`), which holds the sandbox launcher;
 - `allow_network: false` with any provider except `echo` — the `meta` and

@@ -409,8 +409,9 @@ class MuseSandbox:
             raise MuseSandboxError(
                 f"os_env.sandbox.{', '.join(unsupported)} not yet supported "
                 "for Muse: this harness does not start the egress proxy or "
-                "git SSH relay they need; remove them, or set "
-                "allow_network: false with the 'echo' provider"
+                "git SSH relay they need (see "
+                "https://github.com/R7L208/omnigent-muse/issues/30); remove "
+                "them, or set allow_network: false with the 'echo' provider"
             )
         if policy.backend_type == "darwin_seatbelt":
             raise MuseSandboxError(
