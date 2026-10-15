@@ -495,7 +495,10 @@ class MuseSandbox:
         masks = [
             path
             for kind in _XDG_KINDS
-            for path in _mask_around(_user_muse_dir(env, kind).resolve(), grants)
+            # realpath: Path.resolve() raises on a symlink loop before 3.13.
+            for path in _mask_around(
+                Path(os.path.realpath(_user_muse_dir(env, kind))), grants
+            )
         ]
         policy = dataclasses.replace(
             policy, mask_paths=[*(policy.mask_paths or []), *masks]
