@@ -121,7 +121,10 @@ Inside the sandbox the harness:
   in from your Muse config directory (`$XDG_CONFIG_HOME/muse`, default
   `~/.config/muse`). Nothing written inside the sandbox reaches your own
   login: a token refresh made there stays in the private home, and is replaced
-  when you log in again (or dropped when you log out). `trust.json` is not
+  when you log in again (or dropped when you log out). Keeping the copy
+  private cannot sign you out: the Meta login (a device-code access token and
+  the API key minted from it) has no refresh token to rotate, and Muse 1.4.9
+  leaves it unchanged across sandboxed turns. `trust.json` is not
   copied, so a sandboxed run starts with no trusted workspaces.
   `META_API_KEY` reaches Muse only when it is passed through, as unsandboxed;
 - hides your own Muse directories (`~/.config/muse`, `~/.local/share/muse`,
